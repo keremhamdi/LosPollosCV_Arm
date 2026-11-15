@@ -82,9 +82,9 @@ class Pipeline:
         self.workspace, self.validation, self.destinations = workspace, validation, destinations
         self.out, self.image, self.hand_image, self.ocr = out, image, hand_image, ocr
 
-    def run(self, command, target, *, dry_run):
+    def run(self, command, target, *, dry_run, destination=None):
         kind = command["message_type"]
-        destination = "bowl" if kind == "dispense" else "handover"
+        destination = destination or ("bowl" if kind == "dispense" else "handover")
         prepared = {}
 
         def before(report, images, results, status, metadata, bridge):

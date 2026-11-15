@@ -19,7 +19,9 @@ import uuid
 from reachy_target import resolve_target
 
 SCHEMA = "medicine_buddy.arm.v1"
-ROUTES = {"/v1/dispense": "dispense", "/v1/fetch": "fetch", "/v1/locate": "locate", "/v1/check_taken": "check_taken"}
+# Destinations Buddy may name -> measured destination entries in --destinations.
+DESTINATIONS = {"bowl": "bowl", "handover": "handover", "hand": "handover", "me": "handover"}
+ROUTES = {"/v1/dispense": "dispense", "/v1/fetch": "fetch", "/v1/move_object": "move_object", "/v1/locate": "locate", "/v1/check_taken": "check_taken"}
 
 
 def validate_command(body, kind):
@@ -37,6 +39,19 @@ def validate_command(body, kind):
         name = med.get("name")
         if med.get("person") is not None and not isinstance(med["person"], str):
             raise ValueError("medicine.person must be a string or null")
+    elif kind == "move_object":
+        # Current Medicine Buddy main: {"object": {"label", "kind_hint"}, "destination", "actions"}.
+        obj = body.get("object")
+        if not isinstance(obj, dict):
+            raise ValueError("move_object needs object: {label, kind_hint}")
+        name = obj.get("label")
+        if obj.get("kind_hint") is not None and not isinstance(obj["kind_hint"], str):
+            raise ValueError("object.kind_hint must be a string or null")
+        if body.get("actions", ["locate", "pick", "place"]) != ["locate", "pick", "place"]:
+            raise ValueError("Unsupported move_object actions")
+        destination = body.get("destination", "bowl")
+        if not isinstance(destination, str) or len(destination) > 100:
+            raise ValueError("destination must be a string of at most 100 characters")
     else:
         name = body.get("object")
     if not isinstance(name, str) or not name.strip() or len(name) > 500:
@@ -175,6 +190,20 @@ class Service:
             return {"schema": SCHEMA, "message_type": "check_taken_result", "request_id": body["request_id"],
                     "ok": True, "taken": None, "via": "unavailable",
                     "detail": "Camera evidence does not establish ingestion; ask the person by voice", "error": None}
+        if kind == "move_object":
+            # Buddy speaks `error` aloud for this route, so it carries the sentence
+            # and `error_code` carries the machine code.
+            wanted = " ".join(body.get("destination", "bowl").casefold().replace("the ", " ").split())
+            if wanted not in DESTINATIONS:
+                return result_for(body, error_code="UNSUPPORTED_DESTINATION", detect_detail="Nothing moved",
+                                  error=f"I can only place things at: {', '.join(sorted(set(DESTINATIONS.values())))}")
+            result = self.run_object(body, name, kind, DESTINATIONS[wanted])
+            if result["error"]:
+                result.update(error_code=result["error"], error=result["detect_detail"] or result["error"])
+            return result
+        return self.run_object(body, name, kind, "bowl" if kind == "dispense" else "handover")
+
+    def run_object(self, body, name, kind, destination):
         target = resolve_target(name, self.items, medicine=kind == "dispense")
         if target["status"] != "RESOLVED":
             return result_for(body, error="UNSUPPORTED_OBJECT" if target["status"] == "REFUSED" else "NEEDS_CLARIFICATION",
@@ -183,7 +212,7 @@ class Service:
         if self.fake:
             return result_for(body, error="FAKE_MODE", detect_detail="Text resolved only; no images were processed and nothing moved",
                               resolution=target, dry_run=True, preview_only=True)
-        report = self.pipeline.run(body, target, dry_run=dry_run)
+        report = self.pipeline.run(body, target, dry_run=dry_run, destination=destination)
         placed = not dry_run and report.get("status") == "PLACED" and report.get("place_verified") is True
         selected = report.get("selection", {}).get("status") == "GO"
         detail = report.get("placement_detail") or report.get("error") or "; ".join(report.get("execution_blocks", [])) or report["status"]
@@ -196,7 +225,7 @@ class Service:
             error=None if placed or (kind == "locate" and selected) else "DRY_RUN" if dry_run else report.get("status", "FAILED"),
             motion_attempted=report.get("motion_attempted", False), dry_run=dry_run, preview_only=dry_run,
             requires_operator_review=report.get("motion_attempted") is True and report.get("status") in ("MOTION_RESULT_UNKNOWN", "PLACE_UNVERIFIED"),
-            resolution=target, vision={k: report.get(k) for k in ("status", "object_present", "selection", "region", "execution_blocks", "output_dir")})
+            resolution=target, destination=destination, vision={k: report.get(k) for k in ("status", "object_present", "selection", "region", "execution_blocks", "output_dir")})
 
 
 def make_handler(service):

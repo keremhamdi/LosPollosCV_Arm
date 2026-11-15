@@ -180,6 +180,33 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["score"], .9)
         self.assertIsNone(result["slot_id"])
 
+    def test_buddy_move_object_route_resolves_label_and_destination(self):
+        # Exact JSON shape sent by Medicine Buddy main (MoveObjectCommand.to_json).
+        def move(**changes):
+            return command("move_object", **{"object": {"label": "water bottle", "kind_hint": "bottle"},
+                           "destination": "bowl", "actions": ["locate", "pick", "place"], **changes})
+        preview = self.service.handle("/v1/move_object", move())
+        self.assertEqual(preview["message_type"], "move_object_result")
+        self.assertFalse(preview["ok"])
+        self.assertEqual(preview["error_code"], "DRY_RUN")
+        self.assertIn("nothing moved", preview["error"])
+        self.assertEqual(self.pipeline.run.call_args.args[1]["target"], "water bottle")
+        self.assertEqual(self.pipeline.run.call_args.kwargs["destination"], "bowl")
+        self.service.enable_motion = True
+        self.pipeline.run.return_value = {"status": "PLACED", "place_verified": True, "motion_attempted": True}
+        placed = self.service.handle("/v1/move_object", move(dry_run=False, destination="the handover"))
+        self.assertTrue(placed["ok"] and placed["place_verified"])
+        self.assertEqual(placed["final_state"], "placed")
+        self.assertEqual(self.pipeline.run.call_args.kwargs["destination"], "handover")
+        calls = self.pipeline.run.call_count
+        self.assertEqual(self.service.handle("/v1/move_object", move(destination="kitchen"))["error_code"], "UNSUPPORTED_DESTINATION")
+        self.assertEqual(self.service.handle("/v1/move_object", move(object={"label": "bottle or cup"}))["error_code"], "NEEDS_CLARIFICATION")
+        self.assertEqual(self.service.handle("/v1/move_object", move(object={"label": "a knife"}))["error_code"], "UNSUPPORTED_OBJECT")
+        self.assertEqual(self.pipeline.run.call_count, calls)
+        for bad in ({"object": "water bottle"}, {"actions": ["pick"]}, {"destination": 3}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.service.handle("/v1/move_object", move(**bad))
+
     def test_real_http_contract_matches_request_id_and_replays_once(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.service))
         thread = threading.Thread(target=server.serve_forever, daemon=True)

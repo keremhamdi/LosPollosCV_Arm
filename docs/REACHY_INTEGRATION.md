@@ -91,6 +91,7 @@ The response comes back on the same HTTP request. There are no callbacks.
 | Endpoint | Target fields | Purpose |
 | --- | --- | --- |
 | `/v1/fetch` | `message_type: "fetch"`, `object: "small blue water bottle"`, `deliver_to: "handover"` | Household object request after yes |
+| `/v1/move_object` | `message_type: "move_object"`, `object: {"label": "water bottle", "kind_hint": "bottle"}`, `destination: "bowl"` or `"handover"`, `actions: ["locate","pick","place"]` | What Medicine Buddy main (ba644ff, `move_object` tool) sends today; needs no Reachy patch. On failure `error` is a speakable sentence and `error_code` the machine code |
 | `/v1/dispense` | `message_type: "dispense"`, `medicine: {"id":12,"name":"Aspirin","person":"Mario"}`, `slot_hint:null`, `ocr_min_confidence:0.65`, `actions:["locate","pick_to_bowl","verify_place"]` | Configured closed medicine box after yes |
 | `/v1/locate` | `message_type: "locate"`, `object: "white cup"` | Detection-only extension; never moves, including with dry_run=false |
 | `/v1/check_taken` | `message_type: "check_taken"`, `medicine: {...}` | Returns `taken:null`; Buddy must ask the person |
