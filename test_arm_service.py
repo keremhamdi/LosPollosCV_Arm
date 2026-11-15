@@ -76,6 +76,24 @@ class LanguageTests(unittest.TestCase):
             self.assertEqual(resolve_target(name, items, medicine=True)["status"], "NEEDS_CLARIFICATION")
         self.assertIsNone(resolve_target("water bottle", ITEMS)["form"])
 
+    def test_extra_sam_phrases_widen_everyday_objects_but_never_medicines(self):
+        items = {"water bottle": {"sam_prompts": ["plastic bottle", "clear bottle"]},
+                 "pill box": {"medicine_names": ["Aspirin"], "form": "box", "sam_prompts": ["box"]},
+                 "cup": {"sam_prompts": "mug"}}
+        self.assertEqual(resolve_target("water bottle", items)["sam_prompts"], ["plastic bottle", "clear bottle"])
+        self.assertEqual(resolve_target("Aspirin", items, medicine=True)["sam_prompts"], [])
+        self.assertEqual(resolve_target("cup", items)["status"], "NEEDS_CLARIFICATION")
+
+    def test_items_check_reports_what_is_missing_before_hardware(self):
+        from reachy_target import check_items
+        good = {"height_cm": 5., "width_cm": 4., "fetch_allowed": True}
+        self.assertEqual(check_items({"water bottle": {**good, "aliases": ["drinking bottle"]},
+                                      "paracetamol box": {**good, "medicine_names": ["Paracetamol"], "form": "box"}}), [])
+        problems = "\n".join(check_items({"strip": {"medicine_names": ["Ibuprofen"], "form": "blister", "grasp": "side"},
+                                          "tub": {**good, "form": "pill container"}}))
+        for text in ("grasp: top", "measured height_cm", "fetch_allowed", "no medicine_names"):
+            self.assertIn(text, problems)
+
     def test_acknowledgment_is_not_an_object_and_hazardous_requests_are_refused(self):
         self.assertEqual(resolve_target("yes", ITEMS)["status"], "NEEDS_CLARIFICATION")
         for text in ("bring a knife", "hot cup", "lift the person"):
@@ -156,7 +174,8 @@ class ServiceTests(unittest.TestCase):
 
     def test_unknown_medicine_and_ambiguous_sentence_never_reach_vision(self):
         for body in (command(object="bottle or cup"), command("dispense", medicine={"id": 1, "name": "Unknown"})):
-            self.assertEqual(self.service.handle("/v1/"+body["message_type"], body)["error"], "NEEDS_CLARIFICATION")
+            result = self.service.handle("/v1/"+body["message_type"], body)
+            self.assertEqual(result.get("error_code", result["error"]), "NEEDS_CLARIFICATION")
         self.pipeline.run.assert_not_called()
 
     def test_unknown_motion_outcome_blocks_even_new_ids_until_operator_review(self):
@@ -207,9 +226,11 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(preview["message_type"], "move_object_result")
         self.assertFalse(preview["ok"])
         self.assertEqual(preview["error_code"], "DRY_RUN")
-        self.assertIn("nothing moved", preview["error"])
+        self.assertEqual(preview["error"], "Preview only; nothing moved. I can see it.")
         self.assertEqual(self.pipeline.run.call_args.args[1]["target"], "water bottle")
         self.assertEqual(self.pipeline.run.call_args.kwargs["destination"], "bowl")
+        spoken = self.service.handle("/v1/dispense", command("dispense"))
+        self.assertEqual((spoken["error_code"], spoken["error"]), ("DRY_RUN", "Preview only; nothing moved. I can see it."))
         self.service.enable_motion = True
         self.pipeline.run.return_value = {"status": "PLACED", "place_verified": True, "motion_attempted": True}
         placed = self.service.handle("/v1/move_object", move(dry_run=False, destination="the handover"))

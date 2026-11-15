@@ -71,7 +71,39 @@ def resolve_target(text, items, *, medicine=False):
             return {"status": "NEEDS_CLARIFICATION", "reason": "A flat blister must be configured with grasp: top"}
     if not medicine and profile.get("medicine_names"):
         return {"status": "NEEDS_CLARIFICATION", "reason": "Use dispense_medicine for this configured medicine box"}
-    return {"status": "RESOLVED", "target": target, "description": phrase,
+    # Extra SAM phrases widen recognition of everyday objects only. A medicine is
+    # found by its one configured description and confirmed by reading its label.
+    extra = [] if medicine else profile.get("sam_prompts", [])
+    if (not isinstance(extra, list) or len(extra) > 5 or
+            any(not isinstance(p, str) or not 0 < len(normalize(p).split()) <= 6 for p in extra)):
+        return {"status": "NEEDS_CLARIFICATION", "reason": "sam_prompts must be at most five short phrases"}
+    return {"status": "RESOLVED", "sam_prompts": extra, "target": target, "description": phrase,
             "category": profile.get("category") or (MEDICINE_FORMS[form] if medicine else None),
             "form": form if medicine else None, "profile_matched": bool(found),
             "basis": "configured exact name/alias" if found else "description preserved for SAM; no measured profile matched"}
+
+
+def check_items(items):
+    """Problems in an items file, and what Reachy can ask for. No hardware needed."""
+    problems, names = [], {}
+    for target, profile in items.items():
+        medicine = bool(profile.get("medicine_names"))
+        for spoken in profile.get("medicine_names", []) if medicine else [target, *profile.get("aliases", [])]:
+            out = resolve_target(spoken, items, medicine=medicine)
+            if out["status"] != "RESOLVED" or out["target"] != target:
+                problems.append(f"{target}: '{spoken}' -> {out['status']}: {out.get('reason', 'resolves to ' + str(out.get('target')))}")
+            names.setdefault(normalize(spoken), []).append(target)
+        if not medicine and profile.get("form"):
+            problems.append(f"{target}: has a medicine form but no medicine_names")
+        if not all(isinstance(profile.get(k), (int, float)) and profile[k] > 0 for k in ("height_cm", "width_cm")):
+            problems.append(f"{target}: needs measured height_cm and width_cm")
+        if profile.get("fetch_allowed") is not True:
+            problems.append(f"{target}: fetch_allowed is not true, so the arm will preview but never pick it")
+    return problems
+
+
+if __name__ == "__main__":
+    import json, sys
+    found = check_items(json.load(open(sys.argv[1] if len(sys.argv) > 1 else "items_v1.json")))
+    print("\n".join(found) or "Items file is ready")
+    sys.exit(1 if found else 0)

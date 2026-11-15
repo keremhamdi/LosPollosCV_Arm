@@ -197,11 +197,16 @@ class Service:
             if wanted not in DESTINATIONS:
                 return result_for(body, error_code="UNSUPPORTED_DESTINATION", detect_detail="Nothing moved",
                                   error=f"I can only place things at: {', '.join(sorted(set(DESTINATIONS.values())))}")
-            result = self.run_object(body, name, kind, DESTINATIONS[wanted])
-            if result["error"]:
-                result.update(error_code=result["error"], error=result["detect_detail"] or result["error"])
-            return result
-        return self.run_object(body, name, kind, "bowl" if kind == "dispense" else "handover")
+            return self.speakable(self.run_object(body, name, kind, DESTINATIONS[wanted]))
+        result = self.run_object(body, name, kind, "bowl" if kind == "dispense" else "handover")
+        return self.speakable(result) if kind == "dispense" else result
+
+    @staticmethod
+    def speakable(result):
+        # Medicine Buddy reads `error` aloud for dispense and move_object.
+        if result["error"]:
+            result.update(error_code=result["error"], error=result["detect_detail"] or result["error"])
+        return result
 
     def run_object(self, body, name, kind, destination):
         target = resolve_target(name, self.items, medicine=kind == "dispense")
@@ -215,9 +220,10 @@ class Service:
         report = self.pipeline.run(body, target, dry_run=dry_run, destination=destination)
         placed = not dry_run and report.get("status") == "PLACED" and report.get("place_verified") is True
         selected = report.get("selection", {}).get("status") == "GO"
-        detail = report.get("placement_detail") or report.get("error") or "; ".join(report.get("execution_blocks", [])) or report["status"]
+        detail = report.get("placement_detail") or report.get("error") or "; ".join(report.get("execution_blocks", [])) or ("" if dry_run else report["status"])
         if dry_run:
-            detail = "Preview only; nothing moved. " + detail
+            found = {"GO": "I can see it.", "NOT_FOUND": "I cannot see it.", "AMBIGUOUS": "I see more than one."}
+            detail = " ".join(filter(None, ("Preview only; nothing moved.", found.get(report.get("selection", {}).get("status")), detail)))
         return result_for(body, ok=placed if kind != "locate" else selected,
             final_state="placed" if placed else "aborted" if dry_run else "failed",
             label=body["medicine"]["name"] if kind == "dispense" and placed else None,

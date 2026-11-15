@@ -109,6 +109,11 @@ class VisionTests(unittest.TestCase):
 
     def test_invalid_candidate_blocks_other_positive(self):
         candidates = [{"box": [0, 0, 10, 10]}, {"box": [10, 10, 20, 20]}]
+        with patch.object(ts, "VLM_BACKEND", "none"), patch.object(ts, "sam3_candidates", return_value=[{"target_score": .9}]) as sam:
+            ts.decide(Image.new("RGB", (20, 20)), "water bottle", "bottle", ["plastic bottle", "water bottle"])
+            self.assertEqual(sam.call_args.args[1:], (["water bottle", "plastic bottle", "bottle"], 2))
+            ts.decide(Image.new("RGB", (20, 20)), "water bottle", "bottle")
+            self.assertEqual(sam.call_args.args[1:], (["water bottle", "bottle"],))
         with patch.object(ts, "VLM_BACKEND", "ollama"), patch.object(ts, "sam3_candidates", return_value=candidates), patch.object(ts, "vlm_check", side_effect=[{"match": True, "confidence": .99}, {"match": "false", "confidence": .99}]):
             result = ts.decide(Image.new("RGB", (30, 30)), "cup", None)
         self.assertEqual(result["status"], "CHECK_FAILED")

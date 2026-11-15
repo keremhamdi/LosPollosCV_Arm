@@ -86,6 +86,7 @@ class Pipeline:
         kind = command["message_type"]
         destination = destination or ("bowl" if kind == "dispense" else "handover")
         prepared = {}
+        extra = target.get("sam_prompts") or None
 
         def before(report, images, results, status, metadata, bridge):
             profile = json.loads(Path(self.items).read_text()).get(target["target"], {})
@@ -156,7 +157,7 @@ class Pipeline:
                 raise ValueError("Camera identity changed after release")
             if any(fresh_status.get(k) != status.get(k) for k in ("cam", "pairs", "size", "table_calibration")):
                 raise ValueError("Calibration changed during release")
-            checked = select_candidates(text_pick.ts.decide(fresh["stand"], target["target"], target["category"]),
+            checked = select_candidates(text_pick.ts.decide(fresh["stand"], target["target"], target["category"], *([extra] if extra else [])),
                       fresh["stand"].size, prepared["config"], meta["stand"]["camera_id"])
             verified, detail = placement_evidence(checked, prepared["roi"], results["stand"]["chosen"]["mask"])
             if verified and kind == "dispense":
@@ -168,7 +169,7 @@ class Pipeline:
             report.update(status="PLACED" if verified else "PLACE_UNVERIFIED", place_verified=bool(verified),
                           placement_detail=detail)
 
-        args = argparse.Namespace(text=target["target"], category=target["category"], image=self.image,
+        args = argparse.Namespace(sam_prompts=extra, text=target["target"], category=target["category"], image=self.image,
             hand_image=self.hand_image, arm_url=None if self.image else self.arm_url, calib=None,
             workspace=self.workspace, validation=self.validation, pick_at=None, vlm="none", items=self.items,
             grasp="auto", height=None, above=None, go=not dry_run, show=False, out=self.out)

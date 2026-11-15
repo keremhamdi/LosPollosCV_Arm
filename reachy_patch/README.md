@@ -1,3 +1,7 @@
+> **Superseded.** Medicine Buddy main now has its own `move_object` tool and this
+> patch no longer applies. The arm service accepts `/v1/move_object` directly; see
+> [the note for the Reachy team](../docs/REACHY_TEAM_NOTE.md). Kept for reference.
+
 # Patch for the Reachy team
 
 `fetch_object.patch` applies to

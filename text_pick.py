@@ -303,7 +303,9 @@ def run(args, *, before_motion=None, after_motion=None):
         for role, img in images.items():
             print(f"Checking {role} camera: {parsed['target']}", flush=True)
             img.save(root / f"{role}_input.jpg")
-            result = ts.decide(img, parsed["target"], args.category)
+            extra = getattr(args, "sam_prompts", None)
+            result = (ts.decide(img, parsed["target"], args.category, extra) if extra
+                      else ts.decide(img, parsed["target"], args.category))
             result = select_candidates(result, img.size, workspace if role == "stand" else None,
                                        metadata.get(role, {}).get("camera_id") if role == "stand" else None,
                                        getattr(args, "pick_at", None) if role == "stand" else None)

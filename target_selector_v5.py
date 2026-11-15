@@ -42,7 +42,7 @@ VLM_MODEL = "claude-sonnet-5-5"
 # ---------------- SAM 3 ----------------
 _processor = _model = None
 _device = None
-def sam3_candidates(img: Image.Image, prompts):
+def sam3_candidates(img: Image.Image, prompts, n_target=1):
     # Uses the Hugging Face Transformers integration (model card: huggingface.co/facebook/sam3)
     global _processor, _model, _device
     import torch
@@ -73,7 +73,7 @@ def sam3_candidates(img: Image.Image, prompts):
             m = np.asarray(m.cpu() if hasattr(m, "cpu") else m).squeeze().astype(bool)
             b = [float(v) for v in (b.cpu() if hasattr(b, "cpu") else b)]
             cands.append({"mask": m, "box": b, "sam_score": s, "prompt": p,
-                          "is_target_prompt": p == prompts[0]})
+                          "is_target_prompt": p in prompts[:n_target]})
     return dedupe(cands)
 
 def box_iou(a, b):
@@ -179,9 +179,12 @@ def vlm_check(crop_img: Image.Image, target: str):
     return parse_json(msg.content[0].text)
 
 # ---------------- decision ----------------
-def decide(img: Image.Image, target: str, category: str | None):
-    prompts = [target] + ([category] if category else [])
-    cands = sam3_candidates(img, prompts)
+def decide(img: Image.Image, target: str, category: str | None, extra=()):
+    """`extra` are other phrases for the same object; the best score among them and
+    the target counts as the target score. The category prompt only proposes."""
+    names = [target, *[p for p in extra if p != target]]
+    prompts = names + ([category] if category else [])
+    cands = sam3_candidates(img, prompts, len(names)) if extra else sam3_candidates(img, prompts)
     for c in cands:
         if VLM_BACKEND == "none":
             # SAM-only: trust SAM's own score for the specific target phrase
