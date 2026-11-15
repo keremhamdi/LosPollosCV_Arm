@@ -253,7 +253,7 @@ def save_report(root, report):
     (root / "result.json").write_text(data)
 
 
-def run(args):
+def run(args, *, before_motion=None, after_motion=None):
     root = Path(args.out).resolve() / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:8])
     root.mkdir(parents=True)
     parsed = describe_item(args.text)
@@ -325,10 +325,21 @@ def run(args):
             pick.show(str(root / "stand_preview.jpg"))
         if args.go:
             try:
+                # Internal integration hooks run under the service's single-job lock.
+                # They may add stricter gates; they never remove perception/calibration blocks.
+                if before_motion is not None and not report["execution_blocks"]:
+                    before_motion(report, images, results, status, metadata, bridge)
+                    report["planning_checks_passed"] = not report["execution_blocks"]
+                    save_report(root, report)
                 execute_live(report, images, results, status, metadata, bridge)
+                if after_motion is not None and report["status"] == "HOLDING_REPORTED":
+                    after_motion(report, images, results, status, metadata, bridge)
             except Exception as exc:
                 report.update(status="MOTION_RESULT_UNKNOWN" if report["motion_attempted"] else "EXECUTION_BLOCKED",
                               error=f"{type(exc).__name__}: {exc}")
+                if not report["motion_attempted"]:
+                    report["planning_checks_passed"] = False
+                    report["execution_blocks"].append(report["error"])
                 # A timeout can happen after movement: never automatically retry.
     except Exception as exc:
         report.update(status="CHECK_FAILED", error=f"{type(exc).__name__}: {exc}",

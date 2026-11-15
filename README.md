@@ -30,6 +30,12 @@ clearance and reachability checks. Two cameras alone do not supply 3D geometry.
 
 ## Linux setup
 
+For Reachy Mini voice commands, see [Reachy integration](docs/REACHY_INTEGRATION.md).
+`arm_service.py` exposes Medicine Buddy's HTTP protocol on port 9090 and sends
+resolved object descriptions to this same two-camera SAM pipeline. The included
+Reachy patch adds its fetch tool, preserves spoken confirmation, and displays the
+last structured arm request/response in Family Debug. Ollama is not required.
+
 The full sequence, including the robot's table setup, is in
 [LINUX_HANDOFF.md](LINUX_HANDOFF.md). Your friend needs the robot's working
 NormaCore checkout, generated protobuf modules, Station and camera configuration;

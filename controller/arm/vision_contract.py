@@ -26,7 +26,22 @@ def capabilities():
     return {"protocol_version": PROTOCOL_VERSION, "methods": ["top", "side"],
             "units": "cm", "gripper_open_cm": GRIPPER_OPEN_CM,
             "jaw_margin_cm": JAW_MARGIN_CM, "closing_angle_control": False,
-            "observation_endpoint": "/observation", "structured_grab_result": True}
+            "observation_endpoint": "/observation", "structured_grab_result": True,
+            "structured_place_result": True, "place_preflight": True}
+
+
+def normalize_place(body, locate=None):
+    if "x" in body or "y" in body:
+        x, y = (finite_number(body[k], k) for k in ("x", "y"))
+    elif locate is not None:
+        x, y = locate(finite_number(body["u"], "u"), finite_number(body["v"], "v"))
+    else:
+        raise ValueError("Provide table x/y coordinates")
+    height = finite_number(body.get("height", 4), "height")
+    above = finite_number(body.get("above", 12), "above")
+    if height < .5 or above <= height:
+        raise ValueError("Release height must be >=0.5 cm and approach height must exceed it")
+    return {"x": finite_number(x, "x"), "y": finite_number(y, "y"), "height": height, "above": above}
 
 
 def normalize_grab(body, locate=None):

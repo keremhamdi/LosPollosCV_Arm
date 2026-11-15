@@ -42,7 +42,7 @@ from urllib.parse import parse_qs, urlparse
 
 from arm.arm import GRIPPER_ID, Arm, load_pose, save_pose
 from arm.kinematics import MOTOR_JOINTS, ArmModel
-from arm.vision_contract import capabilities, normalize_grab, MAX_JOINT_AGE_S
+from arm.vision_contract import capabilities, normalize_grab, normalize_place, MAX_JOINT_AGE_S
 from arm.observations import ObservationStore, measured_pose
 from arm.reach import CLEARANCE_CM, Reacher, Unreachable, _solve
 from arm.station import REPO_ROOT
@@ -354,16 +354,21 @@ class App:
                 self.log = "Parked. The gripper kept whatever it was holding (Open gripper to let go)."
             finally:
                 self.busy = False
-        elif name == "place":
+        elif name in ("place", "validate_place"):
             if self.busy:
                 raise RuntimeError("Already moving.")
-            if "x" in body:
-                x, y = float(body["x"]), float(body["y"])
-            else:
-                x, y = cam.locate(float(body["u"]), float(body["v"]))
-            above, height = float(body.get("above", 12)), float(body.get("height", 4))
+            if self.pending is not None:
+                raise RuntimeError("Finish or cancel calibration first")
+            request = normalize_place(body, cam.locate)
+            x, y, above, height = (request[k] for k in ("x", "y", "above", "height"))
             r = self.reach()
+            measured = measured_pose(dict(self.arm.joints), dict(self.arm.joint_updated_at), r.model, time.monotonic())
+            age = time.monotonic() - self.arm.joint_updated_at.get(GRIPPER_ID, -math.inf)
+            if not measured["pose_valid"] or GRIPPER_ID not in self.arm.joints or not 0 <= age <= MAX_JOINT_AGE_S:
+                raise RuntimeError("JOINT_STATE_INVALID: cannot validate placement")
             r.pose_for(x, y, [above, height])  # refuse before moving if the spot can't be reached
+            if name == "validate_place":
+                return {"reachable": True, "motion_attempted": False}
             self.busy = True
             self.log = f"Placing at x={x:.1f}, y={y:.1f}..."
             try:
@@ -374,6 +379,7 @@ class App:
                 self.log = f"Placed at x={x:.1f}, y={y:.1f}."
             finally:
                 self.busy = False
+            return {"released": True, "place_verified": False}
         else:
             raise RuntimeError(f"Unknown action {name}")
         return {}

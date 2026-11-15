@@ -27,7 +27,7 @@ import calibrated_pair
 import pick_v5 as pick
 from controller.arm.kinematics import ArmModel
 from controller.arm.observations import ObservationStore, measured_pose, jpeg_dimensions
-from controller.arm.vision_contract import normalize_grab, capabilities, width_fits
+from controller.arm.vision_contract import normalize_grab, normalize_place, capabilities, width_fits
 
 
 def jpeg():
@@ -74,6 +74,12 @@ def calibrated_fixture():
 
 
 class ContractTests(unittest.TestCase):
+    def test_place_numbers_and_heights_rejected_before_network(self):
+        for body in ({"x": float("nan"), "y": 2}, {"x": True, "y": 2},
+                     {"x": 1, "y": 2, "height": 0}, {"x": 1, "y": 2, "height": 5, "above": 4}):
+            with self.assertRaises(ValueError):
+                normalize_place(body)
+
     def body(self):
         return arm_bridge.grasp_request(1, 2, 4, 12, {"type": "side", "width_cm": 4.7})
 
@@ -286,6 +292,33 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         data = self.app.status()["table_calibration"]
         self.assertEqual(data, {"a": .01, "b": -.02, "c": .03, "touches_m": [[.1, .2, .04]]})
         self.reacher.grab.assert_not_awaited()
+
+    async def test_place_preflight_never_moves_and_release_never_claims_verification(self):
+        self.reacher.pose_for = Mock()
+        self.reacher.goto = AsyncMock()
+        self.arm.move = AsyncMock()
+        body = {"x": 1, "y": 2, "height": 3, "above": 15}
+        checked = await self.app.api("validate_place", body)
+        self.assertEqual(checked, {"reachable": True, "motion_attempted": False})
+        self.reacher.goto.assert_not_awaited()
+        self.arm.move.assert_not_awaited()
+        placed = await self.app.api("place", body)
+        self.assertTrue(placed["released"])
+        self.assertFalse(placed["place_verified"])
+        self.assertEqual(self.reacher.goto.await_count, 3)
+        self.arm.move.assert_awaited_once()
+
+    async def test_place_rejects_pending_calibration_and_stale_feedback(self):
+        self.reacher.pose_for = Mock()
+        self.reacher.goto = AsyncMock()
+        self.app.pending = {"u": 10}
+        with self.assertRaises(RuntimeError):
+            await self.app.api("place", {"x": 1, "y": 2})
+        self.app.pending = None
+        self.arm.joint_updated_at[8] -= 5
+        with self.assertRaises(RuntimeError):
+            await self.app.api("validate_place", {"x": 1, "y": 2})
+        self.reacher.goto.assert_not_awaited()
 
     async def test_follow_bounds_uneven_path_without_commanding_wrist_roll(self):
         reach = self.reach_module.Reacher.__new__(self.reach_module.Reacher)
