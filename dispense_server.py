@@ -11,7 +11,16 @@ POST /v1/dispense   body: {"schema": "medicine_buddy.arm.v1", "message_type": "d
                            "request_id": "...", "medicine": {"name": "Aspirin", ...},
                            "ocr_min_confidence": 0.65, "dry_run": false, ...}
      -> the dispense_result (response body of the same POST; it waits until the arm is done)
+POST /v1/move_object  an everyday thing (Buddy's move_object tool):
+                           {"message_type": "move_object", "object": {"label": "water bottle"},
+                            "destination": "bowl", ...}   -> move_object_result
+                      destination "bowl" (default) or "handover" (needs --handover X Y)
+POST /v1/check_taken  always answers taken: null, so Buddy asks the person
+GET  /health        is the server up, and which requests it takes
 GET  /v1/last       the last request and result (for Family/debug)
+
+  .venv/bin/python dispense_server.py --listen-only      # no arm, no camera: only show what
+                                                         # Reachy sends (to test the connection)
 
 Basic on purpose: one bowl position you give, no slots, place_verified is always false
 (not checked yet), "actions" and "slot_hint" are accepted and ignored.
@@ -22,12 +31,15 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import numpy as np
-import requests
-from PIL import Image
+try:
+    import numpy as np
+    import requests
+    from PIL import Image
 
-import grab_text as G
-import target_selector_v5 as ts
+    import grab_text as G
+    import target_selector_v5 as ts
+except ImportError:   # fine for --listen-only, which needs no camera or arm packages
+    np = requests = Image = G = ts = None
 
 SCHEMA = "medicine_buddy.arm.v1"
 LOCK = threading.Lock()          # one dispense at a time
@@ -101,16 +113,56 @@ def locate(a, name, min_conf):
     return None
 
 
-def dispense(a, req):
-    out = {"schema": SCHEMA, "message_type": "dispense_result", "request_id": req.get("request_id"),
+NOT_FOR_THE_ARM = {"knife", "knives", "scissors", "blade", "razor", "syringe", "needle", "hot", "boiling",
+                   "weapon", "gun", "person", "people"}
+
+
+def locate_object(a, label):
+    """Find an everyday thing in the fixed camera by its look. Returns (u, v, label, score, how)."""
+    img = Image.open(io.BytesIO(requests.get(a.arm_url + "/frame.jpg", timeout=10).content)).convert("RGB")
+    ts.VLM_BACKEND = "none"
+    res = ts.decide(img, label, None)
+    if not res["candidates"]:
+        return None
+    best = max(res["candidates"], key=lambda c: c["target_score"])
+    u, v = G.base_pixel(np.asarray(best["mask"]))
+    return u, v, label, float(best["target_score"]), "by_look"
+
+
+def check_taken(req):
+    """Whether the medicine was swallowed can't be seen from here: Buddy asks the person."""
+    return {"schema": SCHEMA, "message_type": "check_taken_result", "request_id": req.get("request_id"),
+            "ok": True, "taken": None, "via": "unavailable", "detail": "not checked by camera", "error": None}
+
+
+def dispense(a, req, kind="dispense"):
+    """One request from Buddy: a medicine (kind "dispense") or an everyday thing ("move_object")."""
+    out = {"schema": SCHEMA, "message_type": kind + "_result", "request_id": req.get("request_id"),
            "ok": False, "final_state": "failed", "slot_id": None, "label": None, "score": None,
            "place_verified": False, "detect_detail": None, "error": None}
-    if req.get("schema") != SCHEMA or req.get("message_type") != "dispense":
+    if req.get("schema") != SCHEMA or req.get("message_type") != kind:
         out.update(final_state="aborted", error="unexpected schema or message_type")
         return out
-    name = ((req.get("medicine") or {}).get("name") or "").strip()
+    if kind == "dispense":
+        name = ((req.get("medicine") or {}).get("name") or "").strip()
+        place = "bowl"
+    else:
+        obj = req.get("object")
+        name = " ".join(str((obj.get("label") if isinstance(obj, dict) else obj) or "").split())
+        place = str(req.get("destination") or "bowl").lower().replace("the ", "").strip()
+        if NOT_FOR_THE_ARM & set(name.lower().split()):
+            out.update(final_state="aborted", error="I don't move sharp or hot things, or people")
+            return out
+        if place not in ("bowl", "handover") or (place == "handover" and not a.handover):
+            out.update(final_state="aborted", error=f"I can't put things at the {place}; I can use the bowl"
+                                                    + (" or the handover spot" if a.handover else ""))
+            return out
     if not name:
-        out.update(final_state="aborted", error="medicine.name is missing")
+        out.update(final_state="aborted", error="medicine.name is missing" if kind == "dispense" else "object.label is missing")
+        return out
+    if a.listen_only:
+        out.update(final_state="aborted", label=name, detect_detail="listen-only: request received, nothing looked for or moved",
+                   error="This is a connection test; the arm is not connected")
         return out
     if not LOCK.acquire(blocking=False):
         out.update(final_state="aborted", error="arm busy with another dispense")
@@ -119,8 +171,11 @@ def dispense(a, req):
         st = requests.get(a.arm_url + "/status", timeout=10).json()
         if st.get("read_only"):
             raise RuntimeError("arm controller is in read-only mode")
-        found = locate(a, name, float(req.get("ocr_min_confidence", 0.65)))
-        if a.bowl:
+        found = (locate(a, name, float(req.get("ocr_min_confidence", 0.65))) if kind == "dispense"
+                 else locate_object(a, name))
+        if place == "handover":
+            bowl = (a.handover[0], a.handover[1])
+        elif a.bowl:
             bowl = (a.bowl[0], a.bowl[1])
         else:   # find the bowl now, before the arm moves into the picture
             img = Image.open(io.BytesIO(requests.get(a.arm_url + "/frame.jpg", timeout=10).content)).convert("RGB")
@@ -147,7 +202,7 @@ def dispense(a, req):
             return out
         page(a, "place", {"x": bowl[0], "y": bowl[1], "height": a.bowl_height, "above": a.above})
         page(a, "park")
-        out.update(ok=True, final_state="placed", detect_detail=out["detect_detail"] + "; put in bowl (not verified)")
+        out.update(ok=True, final_state="placed", detect_detail=out["detect_detail"] + f"; put in {'bowl' if place == 'bowl' else 'handover spot'} (not verified)")
         return out
     except Exception as e:   # anything the arm or camera refused: report it, never pretend
         out.update(error=f"{type(e).__name__}: {e}")
@@ -167,20 +222,29 @@ def make_handler(a):
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path == "/v1/last":
+            if self.path in ("/v1/last", "/debug/last"):
                 return self._send(200, LAST)
+            if self.path == "/health":
+                return self._send(200, {"ok": True, "schema": SCHEMA, "listen_only": a.listen_only,
+                                        "routes": ["/v1/dispense", "/v1/move_object", "/v1/check_taken"]})
             self._send(404, {"error": "not found"})
 
         def do_POST(self):
-            if self.path != "/v1/dispense":
+            kind = {"/v1/dispense": "dispense", "/v1/move_object": "move_object",
+                    "/v1/check_taken": "check_taken"}.get(self.path)
+            if kind is None:
                 return self._send(404, {"error": "not found"})
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
             except ValueError:
                 return self._send(400, {"error": "body is not JSON"})
+            if not isinstance(req, dict):
+                return self._send(400, {"error": "body is not a JSON object"})
+            if kind == "check_taken":
+                return self._send(200, check_taken(req))
             LAST["request"], LAST["result"] = req, None
-            print(f"dispense: {req.get('medicine')} dry_run={req.get('dry_run')}", flush=True)
-            res = dispense(a, req)
+            print(f"{kind}: {req.get('medicine') or req.get('object')} dry_run={req.get('dry_run')}", flush=True)
+            res = dispense(a, req, kind)
             LAST["result"] = res
             print(f"  -> {res['final_state']} ok={res['ok']} {res['detect_detail'] or ''} {res['error'] or ''}", flush=True)
             self._send(200, res)
@@ -198,6 +262,10 @@ def main():
     ap.add_argument("--bowl-text", default="bowl", help='what the bowl looks like to SAM 3, e.g. "white bowl"')
     ap.add_argument("--bowl", nargs=2, type=float, metavar=("X", "Y"),
                     help="where the bowl stands, table x y in cm (read it off the arm page)")
+    ap.add_argument("--handover", nargs=2, type=float, metavar=("X", "Y"),
+                    help='hand-over spot, table x y in cm, for move_object with destination "handover"')
+    ap.add_argument("--listen-only", action="store_true",
+                    help="no arm, no camera: receive Reachy's requests, show them, answer 'not connected'")
     ap.add_argument("--bowl-height", type=float, default=8.0, help="let go this high above the table, cm")
     ap.add_argument("--close", type=float, default=5.0, help="close the jaws this high above the table, cm")
     ap.add_argument("--above", type=float, default=14.0, help="approach / carry height, cm")
@@ -205,11 +273,15 @@ def main():
     ap.add_argument("--host", default="0.0.0.0", help="0.0.0.0 = reachable from Buddy's laptop")
     ap.add_argument("--port", type=int, default=9090)
     a = ap.parse_args()
+    if ts is None and not a.listen_only:
+        ap.error("camera/arm packages are missing: pip install -r requirements.txt (or use --listen-only)")
     a.meds = load_meds(a.meds)
     if a.meds:
         print("Medicines:", ", ".join(f"{k} -> {v}" for k, v in a.meds.items()))
     where = f"bowl at {a.bowl[0]}, {a.bowl[1]}" if a.bowl else f"finds the '{a.bowl_text}' in the camera"
-    print(f"Medicine Buddy arm server on http://{a.host}:{a.port}/v1/dispense  ({where})")
+    if a.listen_only:
+        where = "LISTEN ONLY: nothing is looked for or moved"
+    print(f"Medicine Buddy arm server on http://{a.host}:{a.port}  /v1/dispense  /v1/move_object  ({where})")
     ThreadingHTTPServer((a.host, a.port), make_handler(a)).serve_forever()
 
 
