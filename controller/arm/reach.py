@@ -35,6 +35,7 @@ from arm.kinematics import MOTOR_JOINTS, TIP_OFFSET, ArmModel, _apply, _ask
 from arm.station import REPO_ROOT
 
 from arm.vision_contract import GRIPPER_OPEN_CM, JAW_MARGIN_CM, width_fits
+from arm.trajectory_timing import bounded_duration, ease
 
 TABLE_FILE = REPO_ROOT / "calib" / "table.json"
 
@@ -48,7 +49,7 @@ MIN_BODY_HEIGHT = 1.5            # cm: lowest any wrist/forearm joint may go
 CLEARANCE_CM = 5.0               # approach this far above an object's top
 MAX_AUTO_TILT = 80               # degrees: most the gripper may lean forward when chosen automatically
 BASE_Y_CM = 4.2                  # the base's turning axis sits at x=0, y=4.2 cm in the model
-MAX_JOINT_SPEED = 700            # servo steps per second, averaged over a move (~60 deg/s)
+MAX_JOINT_SPEED = 700            # peak continuous reference steps/s (~60 deg/s), before integer rounding
 STEPS_PER_RAD = 4096 / (2 * math.pi)
 
 
@@ -79,8 +80,9 @@ def _norm(v):
 class Table:
     """The table surface as a plane z = a*x + b*y + c (metres), fitted from touches."""
 
-    def __init__(self, a, b, c):
+    def __init__(self, a, b, c, touches=None):
         self.a, self.b, self.c = a, b, c
+        self.touches = list(touches or [])
         self.down = _norm((a, b, -1.0))  # direction pointing into the table
 
     @classmethod
@@ -88,16 +90,17 @@ class Table:
         sx = [[sum(f(p) * g(p) for p in pts) for g in (lambda p: p[0], lambda p: p[1], lambda p: 1.0)]
               for f in (lambda p: p[0], lambda p: p[1], lambda p: 1.0)]
         rhs = [sum(f(p) * p[2] for p in pts) for f in (lambda p: p[0], lambda p: p[1], lambda p: 1.0)]
-        return cls(*_solve(sx, rhs))
+        return cls(*_solve(sx, rhs), touches=pts)
 
     @classmethod
     def load(cls):
         if not TABLE_FILE.exists():
             raise RuntimeError("Table not taught yet. Run: python -m arm.reach table  (mirroring ON)")
         d = json.loads(TABLE_FILE.read_text())
-        return cls(d["a"], d["b"], d["c"])
+        return cls(d["a"], d["b"], d["c"], d.get("touches_m"))
 
     def save(self, pts):
+        self.touches = [list(p) for p in pts]
         TABLE_FILE.parent.mkdir(exist_ok=True)
         TABLE_FILE.write_text(json.dumps(
             {"a": self.a, "b": self.b, "c": self.c, "touches_m": [list(p) for p in pts]}, indent=2) + "\n")
@@ -296,13 +299,13 @@ class Reacher:
         way = [start] + [{m: self._raw(m, q[MOTOR_JOINTS[m]]) for m in motors} for q in path]
         way = [{m: w[m] for m in IK_MOTORS} for w in way]  # joint 7 is never commanded
         n = len(way) - 1
-        # Never ask a joint to average more than ~60 deg/s, however short `seconds` is.
-        travel = max(sum(abs(way[i + 1][m] - way[i][m]) for i in range(n)) for m in IK_MOTORS)
-        seconds = max(seconds, travel / MAX_JOINT_SPEED)
+        # Bound peak speed even with uneven waypoint spacing; average travel was
+        # insufficient. The quintic easing also starts/ends with zero acceleration.
+        seconds = bounded_duration(way, seconds, MAX_JOINT_SPEED)
         t0 = time.monotonic()
         while True:
             s = min(1.0, (time.monotonic() - t0) / max(seconds, 0.2))
-            s = s * s * (3 - 2 * s)
+            s = ease(s)
             f = s * n
             i = min(n - 1, int(f))
             u = f - i

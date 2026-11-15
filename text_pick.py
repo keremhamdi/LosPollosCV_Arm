@@ -22,6 +22,8 @@ import grasp_planner_v3 as gp
 import pick_v5 as pick
 import target_selector_v5 as ts
 from voice_pick import describe_item
+from selection_policy import select_candidates
+import calibration_validation
 
 HERE = Path(__file__).resolve().parent
 MAX_RECEIVE_AGE_S = 1.0
@@ -68,8 +70,24 @@ def plan_selection(img, result, profile, *, calibration=None, vlm="none",
         raise ValueError("Selected mask does not match image dimensions")
     region = object_region(mask)
     report.update(status="PREVIEW", object_present=True, region=region)
-    posture, how = gp.detect_posture(ts, img, cand, vlm)
-    method, why = gp.choose_grasp_type(profile, posture, how, method, 5.0)
+    for key in ("width_cm", "height_cm", "grasp_height_frac"):
+        value = profile.get(key)
+        if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value <= 0):
+            raise ValueError(f"Item profile {key} must be finite and positive")
+    if profile.get("grasp_height_frac", .5) >= 1:
+        raise ValueError("Item grasp_height_frac must be strictly between zero and one")
+    # A cup can look squat from the wrist camera. Aspect ratio is not 3D posture.
+    posture = profile.get("posture", "unknown")
+    how = "configured item posture" if posture != "unknown" else "not measured; image aspect ratio is not used"
+    if method != "auto":
+        why = "explicit --grasp choice; requires measured setup for motion"
+    else:
+        method = profile.get("grasp", "auto")
+        why = "configured item grasp method"
+    if method not in ("top", "side"):
+        report.update(status="NEEDS_GRASP_METHOD", posture={"value": posture, "basis": how})
+        report["execution_blocks"].append("Choose a grasp method in a measured item profile or use --grasp for a proposal")
+        return report
     report.update(posture={"value": posture, "basis": how}, method_reason=why,
                   geometry="2D silhouette proposal; table homography is approximate for raised objects",
                   approach={"method": method, "description": (
@@ -77,6 +95,10 @@ def plan_selection(img, result, profile, *, calibration=None, vlm="none",
                       "Open, move above a point nearer the base, lower, approach outward from the base, close, lift"),
                       "collision_checked": False, "orientation_verified": False})
     blocks = report["execution_blocks"]
+    if profile.get("measurements_verified") is not True:
+        blocks.append("Item dimensions and grasp method have not been verified on the real setup")
+    elif method != profile.get("grasp"):
+        blocks.append("Requested grasp method differs from the verified item profile")
     if region["touches_image_edge"]:
         blocks.append("Object is cut off by the image edge")
     g = pixel_grasp(mask, method, profile)
@@ -142,6 +164,9 @@ def render_view(img, result, report, path):
     """Mask, bounding box, jaw contacts and point; image pixels stay unmodified in source files."""
     ts.draw_sam3_style(img, {**result, "status": report["status"]}, str(path), show_all=True)
     vis = cv2.imread(str(path))
+    if result.get("workspace"):
+        polygon = np.asarray(result["workspace"]["polygon_px"], np.int32)
+        cv2.polylines(vis, [polygon], True, (0, 220, 255), 3)
     g = report.get("grasp")
     if g:
         a, b, c = [tuple(int(round(x)) for x in g[k]) for k in ("jaw1_px", "jaw2_px", "point_px")]
@@ -159,7 +184,7 @@ def render_view(img, result, report, path):
     lines = [f"{report['status']} | {report.get('target', '')}",
              (f"Object area: {report['region']['area_px']} px | {report['approach']['method']} approach | "
               "red: grasp point; green: jaw contacts") if g else "No grasp selected",
-             "2D proposal. Robot coordinates require calibration; see result.json."]
+             result.get("decision_reason", "2D proposal. See result.json for execution checks.")]
     for i, line in enumerate(lines):
         cv2.putText(canvas, line[:120], (12, vis.shape[0] + 26 + 30 * i),
                     cv2.FONT_HERSHEY_SIMPLEX, .52, (25, 25, 25), 1, cv2.LINE_AA)
@@ -206,7 +231,7 @@ def execute_live(report, images, results, status, metadata, bridge):
         report["status"] = "EXECUTION_BLOCKED"
         return
     current, fresh_status, fresh_meta = read_live(bridge)
-    if any(fresh_status.get(k) != status.get(k) for k in ("cam", "pairs", "size", "calibrated")):
+    if any(fresh_status.get(k) != status.get(k) for k in ("cam", "pairs", "size", "calibrated", "table_calibration")):
         raise ValueError("Camera calibration changed during planning; rerun the command")
     for role in ("stand", "hand"):
         if fresh_meta[role]["camera_id"] != metadata[role]["camera_id"]:
@@ -255,10 +280,15 @@ def run(args):
         ts.VLM_BACKEND = args.vlm
         ts.PX_PER_CM = None
         profile = gp.load_profile(args.items, parsed["target"])
+        workspace = json.loads(Path(args.workspace).read_text()) if getattr(args, "workspace", None) else None
+        validation = json.loads(Path(args.validation).read_text()) if getattr(args, "validation", None) else None
         for role, img in images.items():
             print(f"Checking {role} camera: {parsed['target']}", flush=True)
             img.save(root / f"{role}_input.jpg")
             result = ts.decide(img, parsed["target"], args.category)
+            result = select_candidates(result, img.size, workspace if role == "stand" else None,
+                                       metadata.get(role, {}).get("camera_id") if role == "stand" else None,
+                                       getattr(args, "pick_at", None) if role == "stand" else None)
             results[role] = result
             view = plan_selection(img, result, profile, calibration=calibration if role == "stand" else None,
                                   vlm=args.vlm, method=args.grasp, height=args.height, above=args.above)
@@ -277,8 +307,16 @@ def run(args):
             blocks.append("Hand camera must also see a unique matching object before live pickup")
         if args.image:
             blocks.append("Saved-image preview cannot command motion")
-        elif status.get("read_only"):
-            blocks.append("Controller is running in read-only mode")
+        else:
+            if status.get("read_only"):
+                blocks.append("Controller is running in read-only mode")
+            if workspace is None:
+                blocks.append("Configure a standing-camera workspace before live pickup")
+            evidence = calibration_validation.validate(validation, status, status.get("table_calibration"),
+                        images["stand"].size, metadata["stand"]["camera_id"],
+                        report.get("footprint", {}).get("target_px"))
+            report["calibration_validation"] = evidence
+            blocks.extend(evidence["errors"])
         if status.get("busy") or status.get("pending") is not None:
             blocks.append("Controller is busy or waiting for calibration")
         report["planning_checks_passed"] = not blocks
@@ -307,6 +345,10 @@ def main(argv=None):
     source.add_argument("--arm-url", help="integrated controller URL on the arm laptop")
     ap.add_argument("--hand-image", help="saved hand-camera frame of the same stationary scene")
     ap.add_argument("--calib", help="measured stand-camera calibration for saved-image planning")
+    ap.add_argument("--workspace", help="stand workspace JSON created with configure_workspace.py")
+    ap.add_argument("--validation", help="independent measured camera/table checks bound to the active geometry")
+    ap.add_argument("--pick-at", nargs=2, type=float, metavar=("U", "V"),
+                    help="explicitly disambiguate at a pixel of the current stand image; never overrides quality checks")
     ap.add_argument("--category", help="optional broad SAM prompt, e.g. box")
     ap.add_argument("--vlm", choices=("none", "ollama", "claude"), default="none",
                     help="optional identity checker; default is SAM 3 only, with no model service")

@@ -4,7 +4,8 @@ target_selector.py — decide "is this the right object?" before the arm moves.
 Pipeline
   1. SAM 3 proposes candidates from two prompts: the specific target ("blue pill box")
      and a broader category ("box"), so a slightly-off phrase doesn't make us miss it.
-  2. Each candidate crop is checked by a VLM: "Is this <target>? yes/no + confidence".
+  2. Exact-target SAM scores select matches by default. An optional checker can
+     inspect crops only when explicitly enabled with --vlm.
   3. Decision rules:
        exactly 1 confident match          -> GO
        0 matches                          -> NOT_FOUND   (Reachy: "I can't find it")
@@ -31,7 +32,7 @@ import cv2
 from PIL import Image
 
 # ---------------- config ----------------
-SAM_SCORE_MIN = 0.35      # keep weak SAM candidates; the VLM does the real filtering
+SAM_SCORE_MIN = 0.35      # retain proposals; exact-target matching is evaluated below
 VLM_CONF_MIN = 0.80       # VLM must be this sure to count as a match
 SAM_ONLY_MIN = 0.50       # with --vlm none: SAM score needed to count as a match
 IOU_DUP = 0.6             # merge duplicate candidates from the two prompts
@@ -268,7 +269,7 @@ def draw(img: Image.Image, res, path):
 # Same look as SAM 3's own plot_results (sam3/visualization_utils.py):
 #   one distinct color per object (palette built like theirs: 5000 random RGB, seed 42,
 #   128 k-means clusters in LAB space), mask filled at 50% opacity, thin box in the
-#   same color, bold label "(id=i, prob=0.xx)" in that color on a 75% white tag, 5 px above.
+#   same color, score label on a 75% white tag, 5 px above.
 SAM3_COLORS = [(49, 150, 141), (93, 36, 115), (163, 176, 52), (179, 118, 49), (227, 49, 205),
                (76, 188, 26), (172, 87, 67), (144, 70, 226), (223, 199, 207), (100, 83, 115),
                (202, 41, 35), (53, 148, 225), (46, 118, 65), (95, 236, 157), (235, 152, 187),
@@ -291,16 +292,18 @@ def draw_sam3_style(img: Image.Image, res, path, show_all=False):
         col = (b, g, r)
         x1, y1, x2, y2 = map(int, c["box"])
         cv2.rectangle(vis, (x1, y1), (x2, y2), col, 4 if (c["is_match"] and show_all) else 2)
-        text = f"(id={i}, prob={c['sam_score']:.2f})"
+        text = f"id={i}, target={c['target_score']:.2f}"
         if show_all:
-            text += "  MATCH" if c["is_match"] else "  no"
+            reasons = c.get("decision", {}).get("reasons", [])
+            selected = c is res.get("chosen")
+            text += "  SELECTED" if selected else "  MATCH" if c["is_match"] else "  " + (reasons[0] if reasons else "no")
         (tw, th), _ = cv2.getTextSize(text, font, 0.5, 2)
         ty = max(th + 4, y1 - 5)
         tag = vis[ty - th - 3:ty + 3, x1:x1 + tw + 4]
         if tag.size:
             vis[ty - th - 3:ty + 3, x1:x1 + tw + 4] = (0.25 * tag + 0.75 * 255).astype(np.uint8)
         cv2.putText(vis, text, (x1 + 2, ty), font, 0.5, col, 2)
-    matches = [str(i) for i, c in enumerate(res["candidates"]) if c["is_match"]]
+    matches = [str(i) for i, c in enumerate(res["candidates"]) if c is res.get("chosen")]
     status = res["status"] + (f"  -> id={','.join(matches)}" if matches else "")
     cv2.putText(vis, status, (10, 30), font, 1.0, (255, 255, 255), 4)
     cv2.putText(vis, status, (10, 30), font, 1.0, (0, 0, 0), 2)
@@ -315,6 +318,13 @@ def summary(res):
     if res["chosen"] is not None:
         out["target_pixel"] = [round(v) for v in mask_center(res["chosen"]["mask"])]
         out["target_shape"] = shape_info(res["chosen"]["mask"])
+    if "decision_reason" in res:
+        out["chosen_candidate_id"] = res["chosen"]["decision"]["candidate_id"] if res["chosen"] else None
+        out["decision_reason"] = res["decision_reason"]
+        out["search_scope"] = res["search_scope"]
+        out["pick_at_px"] = res.get("pick_at_px")
+        for summary, candidate in zip(out["candidates"], res["candidates"]):
+            summary["decision"] = candidate["decision"]
     return out
 
 def grab_frames(cam, n):

@@ -14,9 +14,35 @@ completed without a checker service or robot connection.
   aspect ratio changes with camera viewpoint and is not a reliable 3D posture.
 
 This is one diagnostic example, not a measured recognition success rate. The
-80 offline regression tests pass, including a default-command test that forbids
+offline regressions include a default-command test that forbids
 checker and controller HTTP calls. The earlier checker-enabled photo results
 should not be treated as SAM-only benchmark results.
+
+## Implemented follow-up
+
+The integrated `text_pick.py` path now supports a camera-bound image search
+polygon, mask quality checks and explicit point selection when multiple objects
+remain. It reports reasons per candidate and abstains on uncertain targets.
+It no longer infers posture from mask aspect ratio; measured item profiles define
+the supported method and dimensions before live execution.
+
+The same two photos were rerun with cached SAM 3, network/checker calls forbidden,
+and a deliberately marked image search region. The intended standing-view cup
+was uniquely selected (8,926 mask pixels); the background cups were excluded.
+The hand view selected one cup (38,056 pixels). Both retained unknown posture and
+produced side-grasp **previews** using an explicit method. No metric calibration
+or robot request was used. That demo polygon is an image filter, not measured
+reachability; photos and local demo files are not published.
+
+Independent camera/table validation records now bind unused measurements to the
+active calibration, with changed-geometry and target-coverage checks. The
+controller exposes table coefficients/touches and bounds peak joint reference
+speed for uneven waypoint spacing, with quintic start/stop timing. These changes
+do not establish physical accuracy or remove internal path corners.
+
+See [the setup procedure](WORKSPACE_AND_VALIDATION.md). The remaining priorities
+below require measured geometry or actual robot testing; no new real calibration
+has been supplied, and none has been invented.
 
 ## Recommended implementation order
 
@@ -24,10 +50,9 @@ should not be treated as SAM-only benchmark results.
    camera intrinsics/distortion and fixed-camera alignment. Verify unused physical
    points across the pickup area. Choose a position tolerance from the actual
    gripper/contact clearance; a low fitting residual alone is insufficient.
-2. **Limit target selection to the reachable workspace.** Use measured table
-   bounds to reject background candidates before ambiguity checking. Keep raised
-   object silhouettes intact: their projected upper parts may extend beyond a
-   tabletop polygon. Do not solve ambiguity by blindly taking the largest score.
+2. **Validate the search region against actual reachability.** Image-space
+   filtering is implemented, but a drawn polygon is not a collision map. Measure
+   usable table bounds and approach clearance. Keep raised object masks intact.
 3. **Use measured object and gripper geometry.** Start with a small set of known,
    rigid objects, their dimensions and suitable grasp methods. Do not infer
    upright/flat posture solely from image aspect ratio. Measure opening, finger

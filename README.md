@@ -11,10 +11,11 @@ with the integrated [lospollos-arm](https://github.com/ciloglu44/lospollos-arm) 
 2. Fetch the latest standing and hand images from the NormaCore Station bridge.
 3. Run **SAM 3 (`facebook/sam3`)** on each image to detect matching objects and
    produce their segmentation masks. The default uses SAM confidence for object
-   selection and mask shape for posture. Missing or ambiguous objects do not trigger a pick.
+   selection, a configured workspace to exclude background targets, and mask
+   quality checks. Missing or ambiguous objects do not trigger a pick.
 4. Highlight the object region and report visible area in pixels, a proposed
    grasp point, jaw contacts, and a top or side approach.
-5. With measured calibration and object dimensions, propose robot coordinates.
+5. With measured calibration and object dimensions/grasp method, propose robot coordinates.
    `--go` explicitly requests one supported pickup after the checks pass.
 
 The controller keeps acquiring both camera feeds. SAM runs on snapshots
@@ -40,7 +41,7 @@ cd LosPollosCV_Arm
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -B -m unittest -q test_vision test_integration test_voice_pick test_text_pick test_calibration_report
+python -B -m unittest discover -q
 ```
 
 These dependency versions match the development environment. Install a compatible
@@ -58,8 +59,9 @@ see [optional checkers](docs/OPTIONAL_CHECKERS.md). They are outside the default
 installation. Microphone/speech packages are also optional.
 
 SAM confidence is not a calibrated probability or an independent identity check.
-Without a second checker, exact labels, similar objects and posture inferred from
-an angled silhouette need particular evaluation on your own camera images.
+Exact labels and similar objects need evaluation on your own camera images.
+Posture is no longer inferred from an angled silhouette. Unknown objects need
+an explicit grasp method for a preview, and a verified item profile for pickup.
 
 ## Start both camera feeds
 
@@ -84,7 +86,7 @@ From the repository root:
 ```bash
 .venv/bin/python -B text_pick.py \
   --arm-url http://localhost:8890 \
-  --text "pick up the white cup" --category cup --vlm none
+  --text "pick up the white cup" --category cup --grasp side
 ```
 
 Omit `--text` to type at a prompt. Results go into a new directory under
@@ -97,10 +99,16 @@ Saved images work without the robot:
 ```bash
 .venv/bin/python -B text_pick.py \
   --image /path/to/stand.jpg --hand-image /path/to/hand.jpg \
-  --text "pick up the white cup" --category cup --vlm none
+  --text "pick up the white cup" --category cup --grasp side
 ```
 
 ## Calibration and accuracy
+
+Follow [workspace and independent validation setup](docs/WORKSPACE_AND_VALIDATION.md)
+to configure the search polygon, record unused physical check points, and measure
+item profiles. Live pickup requires `--workspace`, `--validation`, and verified
+item measurements. The current controller exposes table coefficients and touch
+samples through `GET /status` alongside camera calibration.
 
 Read [CALIBRATION.md](CALIBRATION.md) for table-plane, camera-to-table and moving
 hand-camera calibration. The known files currently have centimetre-scale errors;
@@ -127,10 +135,12 @@ is intentionally not committed. Synthetic fixtures are labelled tests only.
 | `arm_bridge.py` | Versioned HTTP contract and one-attempt controller submission |
 | `controller/arm/` | NormaCore connection, kinematics, controller and camera feed |
 | `calibration_report.py` | Read-only diagnostics for measured calibration files |
+| `selection_policy.py`, `configure_workspace.py` | Explainable target selection and fixed-camera search region |
+| `calibration_validation.py` | Independent check measurements bound to the active geometry |
 | `two_camera_setup.json` | Incomplete template for measured two-camera geometry |
 | `calibrated_pair.py`, `multiview_geometry.py` | Offline calibrated triangulation utilities |
 
 Provenance is in [NOTICE.md](NOTICE.md) and `controller/UPSTREAM.json`.
 Development details are in `INTEGRATION.md` and `docs/DEVELOPMENT_NOTES.md`.
-See [next improvements](docs/NEXT_STEPS.md) for the SAM-only photo findings and
-the recommended order of calibration, workspace filtering and grasp-control work.
+See [next improvements](docs/NEXT_STEPS.md) for the implemented changes, photo
+findings and remaining work on calibrated approach feedback.

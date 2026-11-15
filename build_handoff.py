@@ -11,6 +11,8 @@ CALIBRATION.md NOTICE.md docs/DEVELOPMENT_NOTES.md .gitignore
 requirements.txt requirements-voice.txt requirements-test.txt requirements-checkers.txt
 docs/OPTIONAL_CHECKERS.md docs/NEXT_STEPS.md
 calibration_report.py test_calibration_report.py
+selection_policy.py configure_workspace.py calibration_validation.py test_reliability.py
+docs/WORKSPACE_AND_VALIDATION.md
 text_pick.py arm_bridge.py target_selector_v5.py target_selector_v3.py grasp_planner_v3.py
 pick_v5.py voice_pick.py voice_items.json items_v1.json
 two_view.py multiview_geometry.py calibrated_pair.py camera_capture.py two_camera_setup.json
@@ -21,6 +23,7 @@ CONTROLLER_FILES = """
 controller/README.md controller/UPSTREAM.json controller/.env.example controller/arm_client.py
 controller/arm/__init__.py controller/arm/arm.py controller/arm/click.py
 controller/arm/kinematics.py controller/arm/observations.py controller/arm/reach.py
+controller/arm/trajectory_timing.py
 controller/arm/station.py controller/arm/vision_contract.py controller/vision/calibrate_board.py
 """.split()
 FIXTURES = [f"examples/synthetic_pair/{name}.json" for name in ("observation", "calibration", "matches")]

@@ -8,7 +8,8 @@ metric scale, height, or robot coordinates.
 `controller/calib/table.json` stores `z = a*x + b*y + c`, in the robot base frame
 with coordinates in metres, plus measured fingertip touches (`touches_m`).
 `arm.reach.Table` loads it and uses it for heights above the table and movement
-limits. This is directly accessible as a local JSON file on the robot laptop.
+limits. This is directly accessible as a local JSON file on the robot laptop and
+as `table_calibration` in the updated controller's read-only `GET /status`.
 
 On the real robot, preserve its existing validated file, or teach it using
 `python -m arm.reach table` from `controller/`, following the leader/mirroring
@@ -41,7 +42,15 @@ pickup errors**. Neither file passes the current software camera criterion of at
 least 6 marks and no more than 1 cm maximum leave-one-out error. That criterion
 is provisional and is not proof of grasp accuracy. More marks are useful only
 when their coordinates and camera setup are consistent. The actual current
-robot may have different calibration; run the audit against its files.
+robot may have different calibration; run the audit against its files. The owner
+confirmed the setup has not moved and no new calibration has been made. Reusing
+those files therefore retains their known errors rather than resolving them.
+
+The new [independent validation workflow](docs/WORKSPACE_AND_VALIDATION.md) creates
+an empty record bound to the active geometry, camera ID and resolution. Populate
+it with unused measured points; live pickup requires successful checks and target
+coverage. It neither fabricates nor changes the saved calibration. The recorded
+files above still fail the fitting-error gate even if a validation file is supplied.
 
 The upstream checkerboard helper supplies many corners, but all corners from a
 board pose share its manually measured robot alignment. Holding out nearby

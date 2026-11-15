@@ -8,6 +8,7 @@ controller/calib/
 controller/poses/
 controller/moves/
 review_outputs/
+config/local/
 dist/
 camera.json
 calib/

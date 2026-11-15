@@ -26,7 +26,7 @@ def fixture():
     result = {"status": "GO", "chosen": candidate, "candidates": [candidate]}
     calibration = {"size": 160, "pairs": [[u, v, u/10, v/10] for u, v in
         ((0, 0), (159, 0), (0, 119), (159, 119), (80, 0), (80, 119), (0, 60), (159, 60))]}
-    profile = {"width_cm": 4., "height_cm": 12., "grasp": "side"}
+    profile = {"width_cm": 4., "height_cm": 12., "grasp": "side", "measurements_verified": True}
     return image, result, calibration, profile
 
 
@@ -38,7 +38,8 @@ def live_fixture():
                      "image_size": list(image.size), "receive_age_s": .01,
                      "jpeg_base64": base64.b64encode(buf.getvalue()).decode()}
               for i, role in enumerate(("stand", "hand"))}
-    status = {**calibration, "camera_role": "stand", "calibrated": True, "cam": 0}
+    status = {**calibration, "camera_role": "stand", "calibrated": True, "cam": 0,
+              "table_calibration": {"a": 0., "b": 0., "c": 0., "touches_m": [[0, 0, 0]]}}
     packet = {"frames": frames}
     bridge = Mock()
     bridge.get.side_effect = lambda path: copy.deepcopy(status if path == "/status" else packet)
@@ -80,6 +81,31 @@ class PlanningTests(unittest.TestCase):
         report = workflow.plan_selection(image, result, {}, calibration=calibration, method="side")
         self.assertTrue(any("width" in block for block in report["execution_blocks"]))
         self.assertTrue(any("height" in block for block in report["execution_blocks"]))
+
+    def test_unknown_posture_never_chooses_grasp_from_aspect_ratio(self):
+        image, result, _, _ = fixture()
+        report = workflow.plan_selection(image, result, {})
+        self.assertEqual(report["status"], "NEEDS_GRASP_METHOD")
+        self.assertEqual(report["posture"]["value"], "unknown")
+        self.assertNotIn("grasp", report)
+
+    def test_example_dimensions_require_physical_verification(self):
+        image, result, calibration, profile = fixture()
+        del profile["measurements_verified"]
+        report = workflow.plan_selection(image, result, profile, calibration=calibration)
+        self.assertTrue(any("not been verified" in block for block in report["execution_blocks"]))
+
+    def test_override_cannot_reuse_verification_of_another_grasp_method(self):
+        image, result, calibration, profile = fixture()
+        profile["grasp"] = "top"
+        report = workflow.plan_selection(image, result, profile, calibration=calibration, method="side")
+        self.assertIn("Requested grasp method differs from the verified item profile", report["execution_blocks"])
+
+    def test_invalid_dimensions_never_produce_a_motion_request(self):
+        image, result, calibration, profile = fixture()
+        for key, value in (("width_cm", -4), ("height_cm", float("nan")), ("grasp_height_frac", 2)):
+            with self.assertRaises(ValueError):
+                workflow.plan_selection(image, result, {**profile, key: value}, calibration=calibration)
 
     def test_top_angle_is_not_silently_discarded(self):
         image, result, calibration, profile = fixture()
@@ -136,12 +162,16 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(report["status"], "HOLDING_REPORTED")
 
     def test_calibration_change_or_frozen_feed_blocks_post(self):
-        for change in ("calibration", "frozen"):
+        for change in ("calibration", "table", "frozen"):
             bridge, image, result, calibration, profile, status, packet = live_fixture()
             images, initial, metadata = workflow.read_live(bridge)
             report = workflow.plan_selection(image, result, profile, calibration=calibration)
             if change == "calibration":
                 status["pairs"][0][2] += 1
+            elif change == "table":
+                status["table_calibration"]["c"] += .01
+                for frame in packet["frames"].values():
+                    frame["sequence"] += 2
             with self.assertRaises(ValueError):
                 workflow.execute_live(report, images, {r: result for r in images}, initial, metadata, bridge)
             bridge.submit_grasp.assert_not_called()
@@ -182,7 +212,8 @@ class WorkflowTests(unittest.TestCase):
             for view in (report, report["hand_view"]):
                 self.assertTrue(view["object_present"])
                 self.assertIn("SAM only", view["selection"]["candidates"][0]["vlm"]["reason"])
-                self.assertTrue(view["posture"]["basis"].startswith("mask is"))
+                self.assertEqual(view["posture"]["value"], "unknown")
+                self.assertIn("aspect ratio is not used", view["posture"]["basis"])
             self.assertFalse(report["motion_attempted"])
 
     def args(self, root, **kw):
@@ -218,6 +249,22 @@ class WorkflowTests(unittest.TestCase):
             selector.assert_not_called()
             self.assertEqual(report["status"], "CANCELLED")
 
+    def test_invalid_score_produces_serializable_failure_without_motion(self):
+        image, result, _, profile = fixture()
+        result["chosen"]["target_score"] = float("nan")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image.save(root / "frame.jpg")
+            with patch.object(workflow.ts, "decide", return_value=result), \
+                 patch.object(workflow.gp, "load_profile", return_value=profile), \
+                 patch.object(workflow, "ArmBridge") as bridge:
+                report = workflow.run(self.args(root))
+            self.assertEqual(report["status"], "CHECK_FAILED")
+            self.assertIn("invalid score", report["error"])
+            self.assertFalse(report["motion_attempted"])
+            self.assertEqual(json.loads((Path(report["output_dir"])/"result.json").read_text())["status"], "CHECK_FAILED")
+            bridge.assert_not_called()
+
     def test_saved_image_go_rejected_before_loading(self):
         with self.assertRaises(SystemExit), patch.object(workflow, "run") as run:
             workflow.main(["--image", "missing.jpg", "--text", "cup", "--go"])
@@ -237,12 +284,38 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(report["status"], "EXECUTION_BLOCKED")
             bridge.submit_grasp.assert_not_called()
 
+    def test_positive_detections_cannot_bypass_missing_workspace_or_validation(self):
+        from test_reliability import workspace, validation_record
+        for missing in ("workspace", "validation"):
+            bridge, _, result, _, profile, status, _ = live_fixture()
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                args = self.args(root)
+                args.image = args.hand_image = None
+                args.arm_url, args.go = "http://test.invalid", True
+                for name, data in (("workspace", workspace()), ("validation", validation_record(status, status["table_calibration"]))):
+                    path = root / f"{name}.json"
+                    path.write_text(json.dumps(data))
+                    setattr(args, name, None if name == missing else str(path))
+                with patch.object(workflow, "ArmBridge", return_value=bridge), \
+                     patch.object(workflow.ts, "decide", return_value=result), \
+                     patch.object(workflow.gp, "load_profile", return_value=profile):
+                    report = workflow.run(args)
+                self.assertEqual(report["status"], "EXECUTION_BLOCKED")
+                self.assertTrue(any(missing in b.lower() for b in report["execution_blocks"]))
+                self.assertFalse(report["motion_attempted"])
+                bridge.submit_grasp.assert_not_called()
+
     def test_motion_timeout_is_unknown_and_never_retried(self):
         bridge, image, result, calibration, profile, status, packet = live_fixture()
         with tempfile.TemporaryDirectory() as directory:
             args = self.args(Path(directory))
             args.image = args.hand_image = None
             args.arm_url, args.go = "http://test.invalid", True
+            from test_reliability import workspace, validation_record
+            args.workspace, args.validation = str(Path(directory) / "workspace.json"), str(Path(directory) / "validation.json")
+            Path(args.workspace).write_text(json.dumps(workspace()))
+            Path(args.validation).write_text(json.dumps(validation_record(status, status["table_calibration"])))
             meta = {role: {"camera_id": role, "sequence": 1} for role in ("stand", "hand")}
             fresh = {role: {"camera_id": role, "sequence": 2} for role in meta}
             bridge.submit_grasp.side_effect = TimeoutError("connection lost")

@@ -1,4 +1,10 @@
 import unittest
+import io
+import json
+from contextlib import redirect_stdout, redirect_stderr
+from pathlib import Path
+import tempfile
+from unittest.mock import Mock, patch
 
 import calibration_report as audit
 
@@ -40,6 +46,31 @@ class CalibrationAuditTests(unittest.TestCase):
     def test_missing_touch_samples_do_not_invent_accuracy(self):
         report = audit.summarize_table({"a": 0, "b": 0, "c": .02})
         self.assertIsNone(report["fit_max_mm"])
+
+    def test_live_template_binds_active_geometry_and_never_overwrites_measurements(self):
+        status = {**self.camera(), "cam": 0, "camera_role": "stand",
+                  "table_calibration": {"a": 0, "b": 0, "c": 0},
+                  "observations": {"frames": {"stand": {"camera_id": "stand", "image_size": [160, 120]}}}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "validation.json"
+            args = ["--arm-url", "http://test.invalid", "--write-validation-template", str(path)]
+            with patch.object(audit.requests, "get", return_value=Mock(json=lambda: status)) as get, \
+                 patch.object(audit.requests, "post", side_effect=AssertionError("No writes")), redirect_stdout(io.StringIO()):
+                report = audit.main(args)
+                self.assertFalse(report["motion_allowed"])
+                record = json.loads(path.read_text())
+                self.assertEqual(record["camera_id"], "stand")
+                self.assertEqual(record["camera_checks"], [])
+                path.write_text("measurements to preserve")
+                with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                    audit.main(args)
+                self.assertEqual(path.read_text(), "measurements to preserve")
+            self.assertEqual(get.call_args.args[0], "http://test.invalid/status")
+
+    def test_moving_camera_cannot_create_fixed_camera_validation(self):
+        with patch.object(audit.requests, "get", return_value=Mock(json=lambda: {**self.camera(), "camera_role": "hand"})), \
+             redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            audit.main(["--arm-url", "http://test.invalid", "--write-validation-template", "must-not-exist.json"])
 
 
 if __name__ == "__main__":

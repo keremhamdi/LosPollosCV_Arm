@@ -281,6 +281,36 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
             await self.app.api("grab", {"x": 1, "y": 2, "z": 4, "above": 12})
         self.reacher.grab.assert_not_awaited()
 
+    async def test_status_exposes_active_plane_and_original_touches(self):
+        self.reacher.table = self.reach_module.Table(.01, -.02, .03, [[.1, .2, .04]])
+        data = self.app.status()["table_calibration"]
+        self.assertEqual(data, {"a": .01, "b": -.02, "c": .03, "touches_m": [[.1, .2, .04]]})
+        self.reacher.grab.assert_not_awaited()
+
+    async def test_follow_bounds_uneven_path_without_commanding_wrist_roll(self):
+        reach = self.reach_module.Reacher.__new__(self.reach_module.Reacher)
+        reach.arm = self.arm
+        reach._raw = lambda motor, value: int(value)
+        self.arm.hold = AsyncMock()
+        self.arm._settle_and_ease = AsyncMock()
+        sent = []
+        async def write(writes):
+            goals = {motor: int.from_bytes(value, "little") for motor, _, value in writes}
+            sent.append(goals)
+            for motor, goal in goals.items():
+                self.arm.joints[motor].raw = goal
+        self.arm._write = write
+        ticks = iter(np.arange(0., 10., .04))
+        globals_ = self.reach_module.Reacher.follow.__globals__
+        path = [{name: value for name in self.reach_module.MOTOR_JOINTS.values()} for value in (3001, 3101, 3102)]
+        with patch.dict(globals_, {"time": types.SimpleNamespace(monotonic=lambda: next(ticks)),
+                                  "asyncio": types.SimpleNamespace(sleep=AsyncMock())}):
+            await reach.follow(path, .2)
+        for goals in sent:
+            self.assertEqual(set(goals), set(range(1, 7)))
+        self.assertEqual(sent[-1][1], 3102)
+        self.assertLessEqual(max(abs(b-a) for a, b in zip([3000]+[s[1] for s in sent], [s[1] for s in sent])), 29)
+
     async def test_read_only_mode_rejects_all_actions(self):
         self.app.read_only = True
         for name in ("grab", "place", "hold", "release", "reset", "park", "reload"):

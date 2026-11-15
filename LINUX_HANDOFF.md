@@ -22,7 +22,7 @@ installation and physical robot operation have not been tested here.
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -B -m unittest -q test_vision test_integration test_voice_pick test_text_pick test_calibration_report
+python -B -m unittest discover -q
 ```
 
 Install the Torch build suitable for the Linux machine's CPU/CUDA setup if the
@@ -30,7 +30,8 @@ snapshot is not compatible. SAM 3 needs access to `facebook/sam3` on Hugging Fac
 including its access agreement, credentials for the first download and sufficient
 memory. **No Ollama installation, Qwen model, API key or model server is needed.**
 The default is `--vlm none`: SAM runs directly in Python, selection uses SAM scores,
-and posture uses the mask silhouette. Optional checker adapters are described
+and grasp method comes from a measured item profile or an explicit preview choice.
+It does not infer 3D posture from silhouette aspect ratio. Optional checker adapters are described
 separately in `docs/OPTIONAL_CHECKERS.md` and run only when explicitly selected.
 The speech packages are not needed for text input.
 
@@ -98,7 +99,7 @@ From the project root, with the above controller running:
 ```bash
 .venv/bin/python -B text_pick.py \
   --arm-url http://localhost:8890 \
-  --text "pick up the blue pill box" --category box --vlm none
+  --text "pick up the blue pill box" --category box --grasp top
 ```
 
 Omit `--text` to get a typing prompt. There is no arm movement without `--go`.
@@ -128,9 +129,13 @@ Each request creates a separate directory under `review_outputs/text_pick/`:
   approach, calibration diagnostics, controller request and reasons blocking motion.
 
 Pixel area measures the visible silhouette. It is not surface area in square
-centimetres. Unknown objects still get pixel proposals; physical object height
-and width must be measured for a side pickup. `items_v1.json` holds exact-name item
-profiles; its existing dimensions are examples to verify on your objects.
+centimetres. Unknown objects get a mask and area; add `--grasp side` or `--grasp top`
+for an unverified pixel proposal. Physical height and width must be measured for a
+side pickup. `items_v1.json` holds exact-name item profiles; its existing dimensions
+are unverified examples. Follow [workspace and validation setup](docs/WORKSPACE_AND_VALIDATION.md)
+to define a search region, record independent calibration checks, and create the
+measured item profile required for motion. Existing setup being unchanged does
+not eliminate residual errors already present in its calibration.
 
 ## Calibrate the fixed camera
 
@@ -169,11 +174,13 @@ project root, explicitly add `--go` to a live command:
 ```bash
 .venv/bin/python -B text_pick.py \
   --arm-url http://localhost:8890 --text "your measured object" \
-  --items /path/to/measured_items.json --vlm none --go
+  --items config/local/items.json --workspace config/local/workspace.json \
+  --validation config/local/validation.json --go
 ```
 
 `--go` is the execution request; there is no second confirmation prompt. Missing,
-ambiguous or failed detections, missing dimensions, an oversized object, inadequate
+ambiguous or failed detections, uncertain masks, missing/unverified dimensions,
+an oversized object, missing workspace or independent validation, inadequate
 calibration, unsupported orientation, a missing hand match, stale feeds, changed
 camera/calibration or visible scene changes block submission. Before submitting,
 both frames must advance and still resemble the planned scene. This pixel-change

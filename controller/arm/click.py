@@ -227,6 +227,9 @@ class App:
             d["tip"] = None
             d["log"] = str(e)
         d["capabilities"] = capabilities()
+        table = getattr(self.reacher, "table", None)
+        d["table_calibration"] = ({"a": table.a, "b": table.b, "c": table.c,
+                                   "touches_m": table.touches} if table is not None else None)
         d["read_only"] = self.read_only
         d["camera_role"] = self.camera_roles.get(self.camera.cam)
         d["observations"] = self.observations.snapshot(images=False)
