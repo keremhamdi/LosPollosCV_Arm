@@ -258,7 +258,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_top_route(self):
         result = await self.app.api("grab", {"x": 1, "y": 2, "z": 4, "above": 12})
-        self.reacher.grab.assert_awaited_once_with(1, 2, 4, 12)
+        self.reacher.grab.assert_awaited_once_with(1, 2, 4, 12, object_h=None, close_pct=0.0)
         self.assertTrue(result["holding"])
 
     async def test_bridge_to_controller_end_to_end_without_sockets(self):
@@ -304,7 +304,8 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         globals_ = self.reach_module.Reacher.follow.__globals__
         path = [{name: value for name in self.reach_module.MOTOR_JOINTS.values()} for value in (3001, 3101, 3102)]
         with patch.dict(globals_, {"time": types.SimpleNamespace(monotonic=lambda: next(ticks)),
-                                  "asyncio": types.SimpleNamespace(sleep=AsyncMock())}):
+                                  "asyncio": types.SimpleNamespace(sleep=AsyncMock()),
+                                  "roll_raw": lambda: None}):   # as on an arm without a saved wrist position
             await reach.follow(path, .2)
         for goals in sent:
             self.assertEqual(set(goals), set(range(1, 7)))

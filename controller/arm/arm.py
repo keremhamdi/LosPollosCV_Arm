@@ -75,8 +75,14 @@ SEND_RATE_HZ = 25  # how often we send goal updates during a move
 
 GRIPPER_ID = 8
 BLOCKED_STEPS = 40     # a joint ending further than this from its target counts as blocked
+SAG_TOL = 10           # steps (~1 deg): closer than this to the target counts as arrived
+MAX_SAG_PUSH = 150     # steps (~13 deg): most we aim past a target to make up for the arm sagging
 GRIPPER_SQUEEZE = 40   # how far past the contact point the gripper keeps pushing (light grip)
 GRIPPER_DEADBAND = 60  # gripper target this close to where it is: leave the gripper alone
+GRIP_LAG_STEPS = 45    # closing: jaws this far behind their target (beyond their usual lag) ...
+GRIP_STILL_STEPS = 5   # ... while not having moved more than this ...
+GRIP_STILL_READINGS = 3   # ... over this many readings = they have met the object
+GRIP_KEPT_STEPS = 12   # holding: jaws still at least this far short of their squeeze target = object still there
 
 log = logging.getLogger("arm")
 
@@ -129,6 +135,7 @@ class Arm:
         self.last_update = 0.0
         self.joint_updated_at: dict[int, float] = {}
         self._holding = False
+        self.sag: dict[int, int] = {}   # per joint: how far past its target it is held (sag correction)
         self._client = None
         self._tasks: list[asyncio.Task] = []
         self._error: Exception | None = None
@@ -248,6 +255,8 @@ class Arm:
         """
         ids = list(self.joints)
         off = [i for i in ids if not self.joints[i].torque]
+        for i in off:
+            self.sag.pop(i, None)
         if off:
             await self._write([(i, GOAL_POSITION, self.joints[i].raw.to_bytes(2, "little")) for i in off])
         await self._write(
@@ -287,14 +296,44 @@ class Arm:
                 return
             prev, prev_t = cur, self.last_update
 
-    async def _settle_and_ease(self, end: dict[int, int]):
+    async def _settle_and_ease(self, end: dict[int, int], correct_sag: bool = True, aim: dict[int, int] | None = None):
         """After a move: let servos settle, then stop blocked joints from pushing.
 
         A joint that didn't get there is blocked (table, its own body, an object).
         If it keeps pushing it overloads and trips every few seconds. The gripper
         keeps a light squeeze so it doesn't drop what it holds.
+
+        `end` is where each joint should really be (what its encoder should read). `aim` is what the
+        servos were last told (default: the same); it differs when the move already aimed past the
+        targets to make up for sag.
         """
         await self._wait_settled(list(end))
+        # Make up for sag first: under the arm's own weight (more when the servos are warm, the arm
+        # reaches far, or it holds something) shoulder and elbow stop a few degrees short and the
+        # servo doesn't push the last bit. Aim past the target by what's missing, up to twice.
+        # A joint that still doesn't get there after that is really blocked: eased off below.
+        aim = {i: (aim or {}).get(i, t) for i, t in end.items()}
+        for _ in range(2 if correct_sag else 0):
+            pushes = []
+            for i, target in end.items():
+                if i == GRIPPER_ID:
+                    continue
+                j = self.joints[i]
+                off = target - j.raw
+                if abs(off) <= SAG_TOL:
+                    continue
+                new = max(target - MAX_SAG_PUSH, min(target + MAX_SAG_PUSH, aim[i] + off))
+                new = max(j.range_min, min(j.range_max, new))
+                if new != aim[i]:
+                    aim[i] = new
+                    pushes.append((i, GOAL_POSITION, int(new).to_bytes(2, "little")))
+            if not pushes:
+                break
+            await self._write(pushes)
+            await self._wait_settled([p[0] for p in pushes])
+        for i, target in end.items():
+            if i != GRIPPER_ID:
+                self.sag[i] = aim[i] - target   # how far past the target this joint is held
         eases = []
         for i, target in end.items():
             j = self.joints[i]
@@ -307,6 +346,7 @@ class Arm:
             else:
                 log.warning("joint %d blocked %d steps short of target, easing off", i, abs(off))
                 push = 0
+                self.sag[i] = 0
             eases.append((i, GOAL_POSITION, (j.raw + push).to_bytes(2, "little")))
         if eases:
             await self._write(eases)
@@ -342,6 +382,78 @@ class Arm:
                 break
             await asyncio.sleep(1 / SEND_RATE_HZ)
         await self._settle_and_ease(end)
+
+    async def close_gripper(self, target_pct: float = 0.0, seconds: float = 2.4, squeeze: int = GRIPPER_SQUEEZE):
+        """Close the jaws until they meet something, then hold it with a light squeeze.
+
+        The jaws move at a steady, moderate speed. The moment they stop moving while their target keeps
+        going, they have met the object: stop there and keep only a small squeeze. So the grip is the
+        same gentle one whatever the object's width, and nothing gets shot out or crushed.
+
+        Returns (holding, open_pct): whether the jaws stopped on something before closing completely,
+        and how far open they ended up (0-100 %).
+        """
+        g = self.joints.get(GRIPPER_ID)
+        if g is None:
+            raise ValueError("No gripper joint on the follower.")
+        await self.hold()
+        start = g.goal if g.torque else g.raw
+        end = g.raw_for(target_pct)
+        span = max(1, g.range_max - g.range_min)
+        if abs(end - start) < GRIPPER_DEADBAND:
+            g = self.joints[GRIPPER_ID]
+            return abs(g.raw - end) > BLOCKED_STEPS, round(100.0 * (g.raw - g.range_min) / span, 1)
+        direction = 1 if end > start else -1
+        rate = span / max(0.5, seconds)              # steps per second: the whole range takes `seconds`
+        goal, t_prev = float(start), time.monotonic()
+        seen, lags, seen_t = [], [], None
+        contact = None
+        while True:
+            now = time.monotonic()
+            goal += direction * rate * (now - t_prev)
+            t_prev = now
+            done = (goal - end) * direction >= 0
+            if done:
+                goal = float(end)
+            await self._write([(GRIPPER_ID, GOAL_POSITION, int(round(goal)).to_bytes(2, "little"))])
+            await asyncio.sleep(1 / SEND_RATE_HZ)
+            if self.last_update != seen_t:           # a new reading from the servo
+                seen_t = self.last_update
+                raw = self.joints[GRIPPER_ID].raw
+                seen.append(raw)
+                lags.append(abs(goal - raw))
+                if len(seen) >= GRIP_STILL_READINGS + 1:
+                    moved = abs(seen[-1] - seen[-1 - GRIP_STILL_READINGS])
+                    # how far behind the jaws normally run while moving freely (the first second or so)
+                    free = sorted(lags[2:max(3, len(lags) - GRIP_STILL_READINGS)])
+                    usual = free[len(free) // 2] if free else 0.0
+                    if moved <= GRIP_STILL_STEPS and lags[-1] > usual + GRIP_LAG_STEPS:
+                        contact = raw
+                        break
+            if done:
+                break
+        if contact is None:                          # reached the end: let it settle, then look again
+            await self._wait_settled([GRIPPER_ID], timeout=1.5)
+            raw = self.joints[GRIPPER_ID].raw
+            if abs(end - raw) > BLOCKED_STEPS:
+                contact = raw
+        g = self.joints[GRIPPER_ID]
+        if contact is not None:
+            hold = max(g.range_min, min(g.range_max, contact + direction * squeeze))
+            if (hold - end) * direction > 0:         # never past the requested target
+                hold = end
+            await self._write([(GRIPPER_ID, GOAL_POSITION, int(hold).to_bytes(2, "little"))])
+            await asyncio.sleep(0.35)
+            g = self.joints[GRIPPER_ID]
+            log.info("gripper met something at %d steps, holding it lightly", contact)
+        holding = contact is not None and abs(g.raw - end) > BLOCKED_STEPS
+        return holding, round(100.0 * (g.raw - g.range_min) / span, 1)
+
+    def gripper_still_holding(self) -> bool:
+        """After close_gripper said it holds something: is it still there? (If the object slipped out,
+        the jaws have closed the last bit to their target.)"""
+        g = self.joints.get(GRIPPER_ID)
+        return bool(g and g.torque and abs(g.goal - g.raw) >= GRIP_KEPT_STEPS)
 
     async def go(self, pose_name: str, seconds: float = 2.0):
         await self.move(load_pose(pose_name), seconds)
