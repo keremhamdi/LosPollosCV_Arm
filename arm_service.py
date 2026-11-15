@@ -225,7 +225,7 @@ class Service:
             error=None if placed or (kind == "locate" and selected) else "DRY_RUN" if dry_run else report.get("status", "FAILED"),
             motion_attempted=report.get("motion_attempted", False), dry_run=dry_run, preview_only=dry_run,
             requires_operator_review=report.get("motion_attempted") is True and report.get("status") in ("MOTION_RESULT_UNKNOWN", "PLACE_UNVERIFIED"),
-            resolution=target, destination=destination, vision={k: report.get(k) for k in ("status", "object_present", "selection", "region", "execution_blocks", "output_dir")})
+            medicine_form=target.get("form"), resolution=target, destination=destination, vision={k: report.get(k) for k in ("status", "object_present", "selection", "region", "execution_blocks", "output_dir")})
 
 
 def make_handler(service):

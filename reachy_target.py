@@ -7,6 +7,12 @@ import re
 import unicodedata
 
 
+# Physical forms a medicine may take on the table -> broad SAM prompt for that form.
+# "pill container" is a labelled bottle/tub of pills. Loose pills carry no readable
+# name, so their identity cannot be checked and they are never picked.
+MEDICINE_FORMS = {"box": "box", "blister": "blister pack", "pill container": "pill bottle"}
+
+
 def normalize(text):
     text = unicodedata.normalize("NFKC", text).replace("’", "'").casefold()
     return " ".join(re.sub(r"[^\w']+", " ", text).replace("_", " ").split())
@@ -55,8 +61,17 @@ def resolve_target(text, items, *, medicine=False):
         return {"status": "NEEDS_CLARIFICATION", "reason": "Medicine has no explicit physical-box mapping in medicine_names"}
     target = found[0] if found else phrase
     profile = items.get(target, {})
+    form = profile.get("form")
+    if medicine:
+        if form == "loose pills":
+            return {"status": "REFUSED", "reason": "Loose pills have no readable name; keep them in a labelled box, blister or pill container"}
+        if form not in MEDICINE_FORMS:
+            return {"status": "NEEDS_CLARIFICATION", "reason": f"Medicine item needs form: one of {', '.join(MEDICINE_FORMS)}"}
+        if form == "blister" and profile.get("grasp") != "top":
+            return {"status": "NEEDS_CLARIFICATION", "reason": "A flat blister must be configured with grasp: top"}
     if not medicine and profile.get("medicine_names"):
         return {"status": "NEEDS_CLARIFICATION", "reason": "Use dispense_medicine for this configured medicine box"}
     return {"status": "RESOLVED", "target": target, "description": phrase,
-            "category": profile.get("category"), "profile_matched": bool(found),
+            "category": profile.get("category") or (MEDICINE_FORMS[form] if medicine else None),
+            "form": form if medicine else None, "profile_matched": bool(found),
             "basis": "configured exact name/alias" if found else "description preserved for SAM; no measured profile matched"}

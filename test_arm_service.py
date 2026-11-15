@@ -28,7 +28,7 @@ def command(kind="fetch", **changes):
 
 
 ITEMS = {"water bottle": {"aliases": ["drinking bottle"], "category": "bottle"},
-         "blue pill box": {"medicine_names": ["Aspirin"], "category": "box"}}
+         "blue pill box": {"medicine_names": ["Aspirin"], "category": "box", "form": "box"}}
 
 
 class LanguageTests(unittest.TestCase):
@@ -58,6 +58,23 @@ class LanguageTests(unittest.TestCase):
         for text in ("Asprin", "pill box", "Vitamin D"):
             self.assertEqual(resolve_target(text, ITEMS, medicine=True)["status"], "NEEDS_CLARIFICATION")
         self.assertEqual(resolve_target("blue pill box", ITEMS)["status"], "NEEDS_CLARIFICATION")
+
+    def test_medicine_forms_box_blister_and_pill_container_but_never_loose_pills(self):
+        items = {"paracetamol box": {"medicine_names": ["Paracetamol"], "form": "box"},
+                 "ibuprofen strip": {"medicine_names": ["Ibuprofen"], "form": "blister", "grasp": "top"},
+                 "vitamin tub": {"medicine_names": ["Vitamin D"], "form": "pill container"},
+                 "white tablets": {"medicine_names": ["Metformin"], "form": "loose pills"},
+                 "flat strip": {"medicine_names": ["Amlodipine"], "form": "blister", "grasp": "side"},
+                 "old entry": {"medicine_names": ["Ramipril"]}}
+        for name, target, form, prompt in (("Paracetamol", "paracetamol box", "box", "box"),
+                                           ("ibuprofen", "ibuprofen strip", "blister", "blister pack"),
+                                           ("Vitamin D", "vitamin tub", "pill container", "pill bottle")):
+            out = resolve_target(name, items, medicine=True)
+            self.assertEqual((out["status"], out["target"], out["form"], out["category"]), ("RESOLVED", target, form, prompt))
+        self.assertEqual(resolve_target("Metformin", items, medicine=True)["status"], "REFUSED")
+        for name in ("Amlodipine", "Ramipril"):
+            self.assertEqual(resolve_target(name, items, medicine=True)["status"], "NEEDS_CLARIFICATION")
+        self.assertIsNone(resolve_target("water bottle", ITEMS)["form"])
 
     def test_acknowledgment_is_not_an_object_and_hazardous_requests_are_refused(self):
         self.assertEqual(resolve_target("yes", ITEMS)["status"], "NEEDS_CLARIFICATION")
@@ -177,6 +194,7 @@ class ServiceTests(unittest.TestCase):
         result = self.service.handle("/v1/dispense", body)
         self.assertEqual(self.pipeline.run.call_args.args[1]["target"], "blue pill box")
         self.assertEqual(result["label"], "Aspirin")
+        self.assertEqual(result["medicine_form"], "box")
         self.assertEqual(result["score"], .9)
         self.assertIsNone(result["slot_id"])
 

@@ -192,3 +192,27 @@ The service's `GET /debug/last` is localhost-only. The patched Reachy Family Deb
 page also shows the last structured arm request/response, with its normal access
 control. Local journals, calibration, patient data and photos are excluded from
 Git and the source archive.
+
+## Medicine forms
+
+Every item that Buddy may dispense needs `medicine_names` (the exact names in
+Buddy's medicine list) and a `form` in the items file:
+
+| `form` | What it is | Notes |
+|---|---|---|
+| `box` | Rectangular carton with the name printed on it | Name is read by OCR on the standing camera |
+| `blister` | Thin aluminium strip | Must have `"grasp": "top"` and a measured `height_cm`; the name must be readable on the side facing up |
+| `pill container` | Labelled bottle or tub of pills | Label must face the standing camera |
+| `loose pills` | Pills lying on the table | Always refused: there is no name to read, so identity cannot be checked |
+
+```json
+"paracetamol box": {"medicine_names": ["Paracetamol"], "form": "box",
+                    "height_cm": 0, "width_cm": 0, "grasp": "top", "fetch_allowed": false}
+```
+
+Replace the zeros with measured values and set `fetch_allowed` to `true` only
+after a physical trial of that item. A medicine with no `form`, or a blister not
+set to a top grasp, is answered with `NEEDS_CLARIFICATION` and nothing moves.
+The form also supplies the broad SAM prompt (`box`, `blister pack`,
+`pill bottle`) when the item has no `category`. OCR on reflective foil and
+picking a strip a few millimetres high have not been tried on the real arm.
