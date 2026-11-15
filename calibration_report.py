@@ -8,6 +8,49 @@ import requests
 
 from pick_v5 import Calib
 import calibration_validation
+from controller.arm.kinematics import TIP_OFFSET
+
+
+def summarize_target(table, x_cm, y_cm, height_cm):
+    """Expose the same plane-normal fingertip target used by Reacher._target."""
+    a, b, c = [table[k] for k in ("a", "b", "c")]
+    values = [a, b, c, x_cm, y_cm, height_cm]
+    if any(type(v) not in (int, float) or not np.isfinite(v) for v in values):
+        raise ValueError("Plane and target coordinates must be finite numbers")
+    if height_cm < 0:
+        raise ValueError("Target height must be nonnegative")
+    contact_cm = np.array([x_cm, y_cm, a*x_cm + b*y_cm + c*100])
+    normal = np.array([-a, -b, 1.]) / np.sqrt(a*a + b*b + 1)
+    return {"table_contact_base_cm": contact_cm.tolist(),
+            "tip_target_base_cm": (contact_cm + normal*height_cm).tolist(),
+            "height_above_plane_cm": height_cm, "table_normal_base": normal.tolist(),
+            "tip_offset_gripper_m": list(TIP_OFFSET),
+            "reference": "point between closed fingertips, not wrist or camera origin",
+            "physical_accuracy_validated": False}
+
+
+def summarize_tip(table, frame, measured_height_cm=None):
+    """Read encoder FK at frame receipt. Not image-derived depth or metrology."""
+    pose = frame.get("pose", {})
+    age = frame.get("receive_age_s")
+    if (pose.get("pose_valid") is not True or pose.get("translation_units") != "m" or
+        type(age) not in (float, int) or not np.isfinite(age) or not 0 <= age <= 1):
+        raise ValueError("Fresh valid measured gripper pose required for a fingertip height audit")
+    matrix = np.asarray(pose.get("T_base_gripper"), dtype=float)
+    if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+        raise ValueError("Invalid measured gripper transform")
+    p = (matrix @ np.array([*TIP_OFFSET, 1.]))[:3]
+    a, b, c = [float(table[k]) for k in ("a", "b", "c")]
+    height = float((p[2] - a*p[0] - b*p[1] - c) / np.sqrt(a*a + b*b + 1) * 100)
+    report = {"tip_base_cm": (p*100).tolist(), "encoder_height_above_plane_cm": height,
+              "tip_offset_gripper_m": list(TIP_OFFSET), "physical_accuracy_validated": False,
+              "timestamp_basis": "host_receive; hold the arm still for a ruler comparison"}
+    if measured_height_cm is not None:
+        if not np.isfinite(measured_height_cm) or measured_height_cm < 0:
+            raise ValueError("Measured fingertip height must be finite and nonnegative")
+        report.update(measured_height_cm=measured_height_cm,
+                      encoder_minus_measured_cm=height-measured_height_cm)
+    return report
 
 
 def summarize_camera(data):
@@ -60,9 +103,16 @@ def main(argv=None):
     parser.add_argument("--write-validation-template", help="write an empty record bound to the loaded geometry")
     parser.add_argument("--camera-id", help="exact stand camera ID from /observation")
     parser.add_argument("--image-size", nargs=2, type=int, metavar=("WIDTH", "HEIGHT"))
+    parser.add_argument("--target-cm", nargs=2, type=float, metavar=("X", "Y"), help="inspect a table XY target; no motion")
+    parser.add_argument("--height-cm", type=float, help="requested fingertip height above the table; use with --target-cm")
+    parser.add_argument("--measured-tip-height-cm", type=float, help="ruler height of stationary fingertips to compare with live encoder FK")
     args = parser.parse_args(argv)
     if not any((args.camera, args.arm_url, args.table)):
         parser.error("Provide --camera, --arm-url or --table")
+    if (args.target_cm is None) != (args.height_cm is None):
+        parser.error("Use --target-cm and --height-cm together")
+    if args.measured_tip_height_cm is not None and not args.arm_url:
+        parser.error("--measured-tip-height-cm requires --arm-url")
     report = {"motion_allowed": False}
     try:
         camera, table, status = None, None, {}
@@ -80,6 +130,15 @@ def main(argv=None):
             table = json.loads(Path(args.table).read_text())
         if table:
             report["table"] = summarize_table(table)
+        if args.target_cm is not None:
+            if not table:
+                raise ValueError("Table calibration required to inspect a target height")
+            report["target_height"] = summarize_target(table, *args.target_cm, args.height_cm)
+        if args.measured_tip_height_cm is not None:
+            if not table:
+                raise ValueError("Table calibration required for a fingertip height comparison")
+            frame = status.get("observations", {}).get("frames", {}).get("stand", {})
+            report["fingertip_comparison"] = summarize_tip(table, frame, args.measured_tip_height_cm)
         if args.validation or args.write_validation_template:
             if args.arm_url and status.get("camera_role") != "stand":
                 raise ValueError("Select the fixed standing camera before recording validation")

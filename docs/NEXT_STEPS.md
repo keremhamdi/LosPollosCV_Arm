@@ -40,6 +40,14 @@ controller exposes table coefficients/touches and bounds peak joint reference
 speed for uneven waypoint spacing, with quintic start/stop timing. These changes
 do not establish physical accuracy or remove internal path corners.
 
+Pickup now starts from a unique standing-camera target without requiring the
+wrist camera to see it first. Both feeds remain required and healthy. Closing
+height uses measured physical item data, not the silhouette's selected image-row
+fraction. Read-only height diagnostics show the base-frame fingertip target and
+compare encoder FK with a stationary ruler measurement. See
+[standing-camera pickup and height](STANDING_FIRST_HEIGHT.md). Autonomous wrist
+scanning and visual servo corrections still need measured geometry and hardware work.
+
 See [the setup procedure](WORKSPACE_AND_VALIDATION.md). The remaining priorities
 below require measured geometry or actual robot testing; no new real calibration
 has been supplied, and none has been invented.

@@ -42,7 +42,9 @@ Background objects wholly outside the region are excluded. Two eligible objects
 inside remain `AMBIGUOUS`; the higher score does not automatically win. Use a more
 specific description or `--pick-at U V` to select a point inside one mask of the
 current standing image. A point cannot override a defective mask or overlapping
-uncertain candidate. The hand camera still needs its own unique match.
+uncertain candidate. The hand camera supplies supplementary information; an absent
+or ambiguous wrist target does not veto a unique standing target. Both feeds still
+need to be healthy and advancing in live mode.
 
 The report includes each candidate's target score, rejection reasons, and mask
 quality. It removes detached speckles only when one component contains at least
@@ -108,7 +110,9 @@ collision clearance, or actual grasp success. The checker explicitly reports
 
 Create `config/local/items.json`, using the exact text target as the key. Measure
 its `width_cm`, `height_cm`, and suitable `grasp_height_frac` (strictly between
-0 and 1); set `grasp` to `side` for the currently supported pickup route. Optional
+0 and 1); alternatively supply a directly measured `grasp_height_cm`, which takes
+precedence over that fraction. Neither setting is inferred from the image row.
+Set `grasp` to `side` for the currently supported pickup route. Optional
 `posture` describes the configured pose, not a vision measurement. Add
 `"measurements_verified": true` only after checking those measurements and that
 grasp method on the actual setup. The shipped example profiles are unverified.
@@ -132,7 +136,9 @@ the physical gripper opening; the existing nominal usable limit is 4.7 cm.
 Inspect the masks, proposed contacts and `execution_blocks` in `result.json`.
 For a physical trial, restart the controller without `--read-only` and add `--go`
 to the same command. Both views must be fresh and advance again before submission;
-a changed scene, calibration or camera blocks that request. No automatic retry
+a changed standing scene, calibration or camera blocks that request. Wrist
+background changes are supplementary. See [height troubleshooting](STANDING_FIRST_HEIGHT.md).
+No automatic retry
 occurs after a lost motion response. Neither this process nor SAM performs
 continuous obstacle avoidance or verifies possession after lifting.
 

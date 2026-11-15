@@ -12,7 +12,7 @@ requirements.txt requirements-voice.txt requirements-test.txt requirements-check
 docs/OPTIONAL_CHECKERS.md docs/NEXT_STEPS.md
 calibration_report.py test_calibration_report.py
 selection_policy.py configure_workspace.py calibration_validation.py test_reliability.py
-docs/WORKSPACE_AND_VALIDATION.md
+docs/WORKSPACE_AND_VALIDATION.md docs/STANDING_FIRST_HEIGHT.md
 arm_service.py reachy_target.py dispense_pipeline.py test_arm_service.py test_dispense_pipeline.py
 docs/REACHY_INTEGRATION.md reachy_patch/fetch_object.patch reachy_patch/README.md
 text_pick.py arm_bridge.py target_selector_v5.py target_selector_v3.py grasp_planner_v3.py

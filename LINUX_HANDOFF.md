@@ -8,7 +8,8 @@ Type an object description → SAM 3 masks and scores → unique
 object selection → proposed jaw contacts and approach → optional HTTP pickup.
 
 The standing camera supplies approximate table coordinates. The integrated hand
-camera supplies an independent identity check and close-up preview. Matching
+camera supplies supplementary detections and a close-up preview when it sees the
+object; it does not have to see it before pickup. Matching
 descriptions in both views do **not** establish stereo correspondence or depth.
 There is no visual servoing, full scene collision planning, or verified 6D grasp.
 
@@ -181,11 +182,16 @@ project root, explicitly add `--go` to a live command:
 `--go` is the execution request; there is no second confirmation prompt. Missing,
 ambiguous or failed detections, uncertain masks, missing/unverified dimensions,
 an oversized object, missing workspace or independent validation, inadequate
-calibration, unsupported orientation, a missing hand match, stale feeds, changed
-camera/calibration or visible scene changes block submission. Before submitting,
-both frames must advance and still resemble the planned scene. This pixel-change
+calibration, unsupported orientation, stale feeds, changed
+camera/calibration or visible standing-scene changes block submission. Before submitting,
+both frames must advance; the standing scene must still resemble the planned scene. This pixel-change
 check is a conservative gate, not a guarantee that the scene is unchanged.
 Station timestamps are receive times, not exposure times.
+
+Closing height now uses a measured `grasp_height_cm` or measured object height
+times `grasp_height_frac`, never the selected silhouette row. See
+[height troubleshooting](docs/STANDING_FIRST_HEIGHT.md) for a read-only ruler/FK
+comparison and instructions for the standing-camera-first workflow.
 
 The controller checks protocol compatibility, joint feedback and reachability.
 It does not plan around arbitrary obstacles. No code in this handoff has been

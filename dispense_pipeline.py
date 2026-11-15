@@ -114,12 +114,23 @@ class Pipeline:
             if body["above"] < report["approach"]["approach_height_cm"]:
                 raise ValueError("Destination approach must be at least as high as the pickup approach")
             if kind == "dispense":
-                scores = [self.ocr(images[r], results[r]["chosen"]["mask"], command["medicine"]["name"]) for r in ("stand", "hand")]
-                if any(type(s) not in (float, int) or not np.isfinite(s) or not 0 <= s <= 1 for s in scores):
-                    raise ValueError("Invalid OCR scores")
-                report["ocr_score"] = min(scores)
-                if min(scores) < max(.65, command["ocr_min_confidence"]):
-                    raise ValueError("LABEL_UNVERIFIED: exact medicine label must pass OCR in both views")
+                score = self.ocr(images["stand"], results["stand"]["chosen"]["mask"], command["medicine"]["name"])
+                if type(score) not in (float, int) or not np.isfinite(score) or not 0 <= score <= 1:
+                    raise ValueError("Invalid standing-camera OCR score")
+                report.update(ocr_score=score, ocr_required_view="stand")
+                if score < max(.65, command["ocr_min_confidence"]):
+                    raise ValueError("LABEL_UNVERIFIED: exact medicine label must pass OCR on the stand-selected object")
+                # A wrist match may be another instance. Record supplementary
+                # evidence; it can neither replace nor veto the stand label check.
+                report["hand_ocr"] = {"status": "NO_UNIQUE_TARGET", "required": False}
+                if results.get("hand", {}).get("status") == "GO":
+                    try:
+                        hand_score = self.ocr(images["hand"], results["hand"]["chosen"]["mask"], command["medicine"]["name"])
+                        if type(hand_score) not in (float, int) or not np.isfinite(hand_score) or not 0 <= hand_score <= 1:
+                            raise ValueError("Invalid supplementary OCR score")
+                        report["hand_ocr"].update(status="OBSERVED", score=hand_score)
+                    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                        report["hand_ocr"].update(status="UNAVAILABLE", error=str(exc))
             bridge.place(body, preflight=True)  # IK only; controller reports no motion.
             prepared.update(body=body, roi=roi, config=config)
             report["destination"] = {"name": destination, "request": body, "preflight_passed": True}

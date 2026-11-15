@@ -1,8 +1,8 @@
 """Text -> two-view segmentation -> grasp proposal -> optional controller pickup.
 
 No hardware is opened on import. Saved images never command motion. The fixed
-stand view supplies approximate table geometry; the hand view checks identity,
-not depth. All physical distances in the controller contract are centimetres.
+stand view selects/localizes the target; hand detections are supplementary,
+not a prerequisite or depth. Controller distances are centimetres.
 """
 import argparse
 import base64
@@ -24,6 +24,8 @@ import target_selector_v5 as ts
 from voice_pick import describe_item
 from selection_policy import select_candidates
 import calibration_validation
+from calibration_report import summarize_target
+from controller.arm.vision_contract import width_fits
 
 HERE = Path(__file__).resolve().parent
 MAX_RECEIVE_AGE_S = 1.0
@@ -70,7 +72,7 @@ def plan_selection(img, result, profile, *, calibration=None, vlm="none",
         raise ValueError("Selected mask does not match image dimensions")
     region = object_region(mask)
     report.update(status="PREVIEW", object_present=True, region=region)
-    for key in ("width_cm", "height_cm", "grasp_height_frac"):
+    for key in ("width_cm", "height_cm", "grasp_height_frac", "grasp_height_cm"):
         value = profile.get(key)
         if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value <= 0):
             raise ValueError(f"Item profile {key} must be finite and positive")
@@ -128,10 +130,12 @@ def plan_selection(img, result, profile, *, calibration=None, vlm="none",
         report["status"] = "NO_GRASP"
         blocks.append("Object width exceeds the usable gripper opening")
     profile_width = profile.get("width_cm")
+    if profile_width and not width_fits(profile_width):
+        blocks.append("Measured item width exceeds the usable gripper opening")
     if profile_width and abs(g["width_cm"] - profile_width) > .35 * profile_width:
         blocks.append("Estimated width disagrees with the item profile by more than 35 percent")
     if g.get("tilt_deg", 0) > 20:
-        blocks.append("Side height estimate is unreliable for this leaning object")
+        blocks.append("Side footprint and configured upright grasp are unreliable for this leaning object")
     if method == "side":
         if not profile_width:
             blocks.append("Side grasp needs measured item width to estimate the footprint")
@@ -141,11 +145,14 @@ def plan_selection(img, result, profile, *, calibration=None, vlm="none",
         t = {"target_px": g["point_px"], "x_cm": x, "y_cm": y,
              "mode": "grasp center projected onto the table; height not corrected"}
     object_height = profile.get("height_cm")
-    if height is None and not object_height:
-        blocks.append("Measured object height or explicit closing height is required")
+    if not object_height:
+        blocks.append("Measured object height is required to verify approach clearance")
     close, lift = pick.grab_heights(profile, height, above)
-    if method == "side" and object_height and height is None:
-        close = max(1.0, float(object_height * g["height_frac"]))
+    height_source = ("explicit --height" if height is not None else
+                     "item grasp_height_cm" if profile.get("grasp_height_cm") is not None else
+                     "item height_cm * grasp_height_frac" if object_height else "unverified default")
+    if object_height and close >= object_height:
+        blocks.append("Closing height must be below the measured object's top")
     if object_height and lift < object_height + pick.CLEARANCE_CM:
         blocks.append("Approach height must clear the object's top")
     accuracy, basis = calib.expected_error()
@@ -156,7 +163,11 @@ def plan_selection(img, result, profile, *, calibration=None, vlm="none",
     blocks.extend(request_errors(body))
     report.update(footprint=t, controller_request=body)
     report["approach"].update(close_height_cm=close, approach_height_cm=lift,
-                               lift_height_cm=lift)
+                               lift_height_cm=lift, height_source=height_source,
+                               height_reference="point between closed fingertips; distance along table normal",
+                               image_grasp_role="2D contact suggestion only; does not determine physical closing height")
+    if calibration.get("table_calibration"):
+        report["height_geometry"] = summarize_target(calibration["table_calibration"], t["x_cm"], t["y_cm"], close)
     return report
 
 
@@ -179,12 +190,15 @@ def render_view(img, result, report, path):
                          tuple(np.rint(np.asarray(p) + normal).astype(int)), color, 4)
         cv2.drawMarker(vis, c, (0, 0, 255), cv2.MARKER_CROSS, 26, 3)
     # Put explanations below the image so they cannot hide the target.
-    canvas = np.full((vis.shape[0] + 105, max(vis.shape[1], 720), 3), 245, np.uint8)
-    canvas[:vis.shape[0], :vis.shape[1]] = vis
     lines = [f"{report['status']} | {report.get('target', '')}",
              (f"Object area: {report['region']['area_px']} px | {report['approach']['method']} approach | "
               "red: grasp point; green: jaw contacts") if g else "No grasp selected",
              result.get("decision_reason", "2D proposal. See result.json for execution checks.")]
+    if report.get("controller_request"):
+        height = report["approach"]["close_height_cm"]
+        lines.append(f"Close: {height:g} cm above table (measured inputs). Image jaw line is advisory.")
+    canvas = np.full((vis.shape[0] + 15 + 30*len(lines), max(vis.shape[1], 720), 3), 245, np.uint8)
+    canvas[:vis.shape[0], :vis.shape[1]] = vis
     for i, line in enumerate(lines):
         cv2.putText(canvas, line[:120], (12, vis.shape[0] + 26 + 30 * i),
                     cv2.FONT_HERSHEY_SIMPLEX, .52, (25, 25, 25), 1, cv2.LINE_AA)
@@ -238,8 +252,12 @@ def execute_live(report, images, results, status, metadata, bridge):
             raise ValueError(f"The {role} camera changed during planning")
         if fresh_meta[role]["sequence"] <= metadata[role]["sequence"]:
             raise ValueError(f"No new {role} camera frame since planning")
-        if changed_scene(images[role], current[role], results[role]["chosen"]["mask"]):
-            raise ValueError(f"Scene changed in the {role} camera; rerun the command")
+    if changed_scene(images["stand"], current["stand"], results["stand"]["chosen"]["mask"]):
+        raise ValueError("Scene changed in the stand camera; rerun the command")
+    # The wrist can point away from the object. Its changing background is not
+    # evidence that the stand-selected target moved; no cross-view association exists.
+    hand_mask = np.zeros((images["hand"].height, images["hand"].width), bool)
+    report["hand_scene_changed_before_motion"] = changed_scene(images["hand"], current["hand"], hand_mask)
     report["motion_attempted"] = True
     result = bridge.submit_grasp(report["controller_request"])
     report.update(controller_result=result,
@@ -302,9 +320,10 @@ def run(args, *, before_motion=None, after_motion=None):
                 report["hand_view"] = view
         report["source"] = metadata or {role: {"image_size": list(im.size)} for role, im in images.items()}
         report["two_view_geometry"] = "Independent semantic checks only; no stereo/depth or instance correspondence established"
+        report["camera_policy"] = {"selection_and_localization": "stand", "hand_detection_required": False,
+                                   "both_live_feeds_required": True, "continuous_visual_servoing": False}
+        report["hand_target_status"] = results.get("hand", {}).get("status", "NO_IMAGE")
         blocks = report["execution_blocks"]
-        if "hand" not in results or results["hand"]["status"] != "GO":
-            blocks.append("Hand camera must also see a unique matching object before live pickup")
         if args.image:
             blocks.append("Saved-image preview cannot command motion")
         else:

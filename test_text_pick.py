@@ -76,11 +76,48 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(report["approach"]["approach_height_cm"], 17.)
         self.assertFalse(report["approach"]["collision_checked"])
 
+    def test_physical_height_does_not_follow_selected_image_row(self):
+        image, result, calibration, profile = fixture()
+        profile.update(height_cm=10., grasp_height_frac=.4)
+        original = workflow.pick.best_side_row
+        for fraction in (.25, .75):
+            def proposed(*a, **kw):
+                return {**original(*a, **kw), "height_frac": fraction}
+            with self.subTest(image_fraction=fraction), patch.object(workflow.pick, "best_side_row", side_effect=proposed):
+                report = workflow.plan_selection(image, result, profile, calibration=calibration)
+            self.assertEqual(report["controller_request"]["z"], 4.)
+            self.assertEqual(report["approach"]["height_source"], "item height_cm * grasp_height_frac")
+
+    def test_explicit_metric_height_precedence_and_out_of_object_rejection(self):
+        image, result, calibration, profile = fixture()
+        profile.update(grasp_height_cm=3.2, grasp_height_frac=.8)
+        report = workflow.plan_selection(image, result, profile, calibration=calibration)
+        self.assertEqual(report["controller_request"]["z"], 3.2)
+        report = workflow.plan_selection(image, result, profile, calibration=calibration, height=4.1)
+        self.assertEqual(report["controller_request"]["z"], 4.1)
+        report = workflow.plan_selection(image, result, profile, calibration=calibration, height=12.)
+        self.assertIn("Closing height must be below the measured object's top", report["execution_blocks"])
+
+    def test_measured_width_cannot_be_overruled_by_underestimated_silhouette(self):
+        image, result, calibration, profile = fixture()
+        profile["width_cm"] = 5.
+        report = workflow.plan_selection(image, result, profile, calibration=calibration)
+        self.assertIn("Measured item width exceeds the usable gripper opening", report["execution_blocks"])
+        profile["width_cm"] = 4.7
+        report = workflow.plan_selection(image, result, profile, calibration=calibration)
+        self.assertNotIn("Measured item width exceeds the usable gripper opening", report["execution_blocks"])
+
     def test_missing_physical_dimensions_block_motion(self):
         image, result, calibration, _ = fixture()
         report = workflow.plan_selection(image, result, {}, calibration=calibration, method="side")
         self.assertTrue(any("width" in block for block in report["execution_blocks"]))
         self.assertTrue(any("height" in block for block in report["execution_blocks"]))
+
+    def test_explicit_closing_height_cannot_bypass_unknown_object_clearance(self):
+        image, result, calibration, profile = fixture()
+        del profile["height_cm"]
+        report = workflow.plan_selection(image, result, profile, calibration=calibration, height=4.)
+        self.assertIn("Measured object height is required to verify approach clearance", report["execution_blocks"])
 
     def test_unknown_posture_never_chooses_grasp_from_aspect_ratio(self):
         image, result, _, _ = fixture()
@@ -103,7 +140,8 @@ class PlanningTests(unittest.TestCase):
 
     def test_invalid_dimensions_never_produce_a_motion_request(self):
         image, result, calibration, profile = fixture()
-        for key, value in (("width_cm", -4), ("height_cm", float("nan")), ("grasp_height_frac", 2)):
+        for key, value in (("width_cm", -4), ("height_cm", float("nan")), ("grasp_height_frac", 2),
+                           ("grasp_height_cm", -1), ("grasp_height_cm", True)):
             with self.assertRaises(ValueError):
                 workflow.plan_selection(image, result, {**profile, key: value}, calibration=calibration)
 
@@ -184,10 +222,23 @@ class LiveTests(unittest.TestCase):
         Image.new("RGB", image.size, "white").save(buf, format="JPEG")
         for frame in packet["frames"].values():
             frame["sequence"] += 2
-        packet["frames"]["hand"]["jpeg_base64"] = base64.b64encode(buf.getvalue()).decode()
+        packet["frames"]["stand"]["jpeg_base64"] = base64.b64encode(buf.getvalue()).decode()
         with self.assertRaises(ValueError):
             workflow.execute_live(report, images, {r: result for r in images}, status, metadata, bridge)
         bridge.submit_grasp.assert_not_called()
+
+    def test_hand_background_change_without_target_is_supplementary(self):
+        bridge, image, result, calibration, profile, status, packet = live_fixture()
+        images, _, metadata = workflow.read_live(bridge)
+        report = workflow.plan_selection(image, result, profile, calibration=calibration)
+        buf = io.BytesIO()
+        Image.new("RGB", image.size, "white").save(buf, format="JPEG")
+        for frame in packet["frames"].values():
+            frame["sequence"] += 2
+        packet["frames"]["hand"]["jpeg_base64"] = base64.b64encode(buf.getvalue()).decode()
+        workflow.execute_live(report, images, {"stand": result, "hand": {"status": "NOT_FOUND", "chosen": None}}, status, metadata, bridge)
+        self.assertTrue(report["hand_scene_changed_before_motion"])
+        bridge.submit_grasp.assert_called_once()
 
 
 class WorkflowTests(unittest.TestCase):
@@ -270,7 +321,7 @@ class WorkflowTests(unittest.TestCase):
             workflow.main(["--image", "missing.jpg", "--text", "cup", "--go"])
         run.assert_not_called()
 
-    def test_hand_negative_blocks_live_pick(self):
+    def test_hand_negative_does_not_replace_other_required_gates(self):
         bridge, _, result, _, profile, _, _ = live_fixture()
         negative = {"status": "NOT_FOUND", "candidates": [], "chosen": None}
         with tempfile.TemporaryDirectory() as directory:
@@ -282,6 +333,9 @@ class WorkflowTests(unittest.TestCase):
                  patch.object(workflow.gp, "load_profile", return_value=profile):
                 report = workflow.run(args)
             self.assertEqual(report["status"], "EXECUTION_BLOCKED")
+            self.assertFalse(report["camera_policy"]["hand_detection_required"])
+            self.assertTrue(any("workspace" in block for block in report["execution_blocks"]))
+            self.assertFalse(any("Hand camera must" in block for block in report["execution_blocks"]))
             bridge.submit_grasp.assert_not_called()
 
     def test_positive_detections_cannot_bypass_missing_workspace_or_validation(self):

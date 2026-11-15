@@ -108,7 +108,7 @@ An unresolved description returns `error: "NEEDS_CLARIFICATION"`. A successful
 detection is separate from successful delivery. Responses include `resolution`
 (the exact SAM target), `vision.selection`, and reasons for blocked motion.
 Household selection scores remain under `vision.selection`; `score` on a medicine
-delivery is the minimum pre-pick OCR word confidence, not SAM confidence.
+delivery is the minimum pre-pick standing-camera OCR word confidence, not SAM confidence.
 
 For dispense/fetch, `ok:true`, `final_state:"placed"`, `place_verified:true`
 require a live pick, controller release and passing post-release camera check.
@@ -145,8 +145,10 @@ destination IK before picking; that check is not obstacle avoidance.
 
 For medicine label checks, install the system Tesseract English OCR engine on
 Linux (`sudo apt install tesseract-ocr tesseract-ocr-eng` on Debian/Ubuntu).
-Exact label tokens must pass at least 0.65 confidence in **both** selected masks
-before pickup, and again in the standing view after placement. A higher request
+Exact label tokens must pass at least 0.65 confidence in the **standing** selected mask
+before pickup, and again in the standing view after placement. Wrist OCR is
+supplementary when a unique target is visible; it cannot replace the standing
+label check, and the wrist need not see the target before approach. A higher request
 threshold is honoured; a lower one cannot weaken the 0.65 floor. Unavailable or
 uncertain OCR blocks delivery. This is a package-label check, not verification
 of contents, formulation or a prescription. See [Tesseract's official TSV documentation](https://tesseract-ocr.github.io/tessdoc/Command-Line-Usage.html#tsv-output).

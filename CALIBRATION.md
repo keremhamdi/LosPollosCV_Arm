@@ -84,9 +84,11 @@ preflight refuses those packets for moving-camera triangulation.
 
 Both cameras can remain connected continuously, but the current text pipeline
 uses independent semantic checks. It does not yet estimate calibrated stereo
-depth or continuously correct the arm during approach. It requires the hand
-camera to see a unique matching target before a live pickup request; if that
-view is occluded or points elsewhere, the request is blocked.
+depth or continuously correct the arm during approach. Standing-camera selection
+and localization can start pickup when the hand view is occluded or points
+elsewhere. Both feeds must remain healthy; hand detections are supplementary.
+Closing height comes from measured item data rather than image-row fractions.
+See [height diagnostics and scan prerequisites](docs/STANDING_FIRST_HEIGHT.md).
 
 For this particular two-camera configuration, accurate 3D pickup needs the
 measured transforms, temporal alignment, real joint calibration, validated

@@ -226,9 +226,12 @@ def choose_target(mask, calib, scale, push_cm, mode):
 
 
 def grab_heights(profile, close_cm, above_cm):
+    """Physical fingertip heights above the table, never silhouette fractions."""
     h = profile.get("height_cm")
     if close_cm is None:
-        close_cm = max(1.0, h / 2) if h else DEFAULT_CLOSE_CM
+        close_cm = profile.get("grasp_height_cm")
+        if close_cm is None:
+            close_cm = h * profile.get("grasp_height_frac", .5) if h else DEFAULT_CLOSE_CM
     if above_cm is None:
         above_cm = max(DEFAULT_ABOVE_CM, h + CLEARANCE_CM) if h else DEFAULT_ABOVE_CM
     return round(close_cm, 1), round(above_cm, 1)
@@ -542,7 +545,8 @@ def main(argv=None):
         if not a.no_show:
             show(a.out)
         return "NO_GRASP"
-    g["height_cm"] = round(height_cm * g["height_frac"], 1) if (g["type"] == "side" and height_cm) else None
+    # Image row fraction is not a metric height under perspective.
+    g["height_cm"] = grab_heights(profile, a.height, a.above)[0] if g["type"] == "side" else None
     # footprint: the table spot under the grasp
     mode = a.point
     if mode == "auto":
@@ -555,11 +559,9 @@ def main(argv=None):
     else:
         t = choose_target(mask, calib, scale, push, "contact")
     close_cm, above_cm = grab_heights(profile, a.height, a.above)
-    if g["height_cm"] is not None and a.height is None:
-        close_cm = max(1.0, g["height_cm"])
     grasp_out = {"type": g["type"], "why": why, "width_cm": g["width_cm"]}
     if g["type"] == "side":
-        grasp_out["at_height_fraction"] = g["height_frac"]
+        grasp_out["image_height_fraction_advisory"] = g["height_frac"]
         if g["height_cm"] is not None:
             grasp_out["fingertip_height_cm"] = g["height_cm"]
     else:

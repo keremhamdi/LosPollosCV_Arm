@@ -41,10 +41,12 @@ RESULT: camera.json in the same format the arm page and pick_v4.py use ({"cam", 
 [[u, v, x_cm, y_cm], ...]}), plus calib_check.jpg and an error report. Copy camera.json to the arm
 project's calib/camera.json. Then check with:   python pick_v4.py --check
 
-Honest accuracy: the script fits the homography on half of the corners and measures the error on the
-other half. That "held-out" number is what to trust, not the fit error. Under 1 cm is good enough for
-grasping. If it stays above 1 cm with a flat board and careful touches, the lens (wide angle) is
-bending the picture; tell whoever builds on this, a lens correction step is then needed.
+Accuracy: the script fits the homography on half of the corners and measures error on the
+other half. These corners still share the measured board alignment; a low held-out error
+does not independently validate robot landing accuracy. Check unused physical points across
+the pickup area. Under 1 cm is a coarse software gate, not proof of adequate jaw clearance.
+Persistent error can come from board alignment, touches/FK, square size, distortion or
+camera settings; inspect those sources rather than assuming it is only lens distortion.
 """
 import argparse, io, json, math, os, shutil, subprocess, sys, time, urllib.request
 import numpy as np
@@ -354,12 +356,13 @@ def calibrate(img, cols, rows, sq, measure, out_path, view_path, check_path, app
 
     print(f"\nWrote {out_path}: {len(pairs)} marks at width {w}px.")
     print(f"  fit error      mean {fit.mean():.2f} cm, max {fit.max():.2f} cm")
-    print(f"  held-out error mean {held.mean():.2f} cm, max {held.max():.2f} cm   <- trust this one")
+    print(f"  held-out corner error mean {held.mean():.2f} cm, max {held.max():.2f} cm (internal consistency)")
+    print("  Check unused physical points and fingertip height separately; this does not certify pickup accuracy.")
     hull = cv2.contourArea(cv2.convexHull((px * w).astype(np.float32)))
     print(f"  the marks cover {100 * hull / (w * h):.0f}% of the picture.")
     if held.max() > 1.0:
         print("  -> above 1 cm. Check: board flat? tip exactly on the corners? square size measured? "
-              "Move the board to more places (--append). If it stays high, the lens is bending the picture.")
+              "Check joint/tool geometry and camera settings too; lens distortion is one possible cause.")
     if hull / (w * h) < 0.15:
         print("  -> the marks cover a small part of the picture. Move the board around the pick area and "
               f"run again with --append {out_path}.")

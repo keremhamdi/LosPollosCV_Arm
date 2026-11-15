@@ -5,11 +5,53 @@ from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 import tempfile
 from unittest.mock import Mock, patch
+import numpy as np
 
 import calibration_report as audit
 
 
 class CalibrationAuditTests(unittest.TestCase):
+    def test_target_height_is_normal_distance_not_base_z_or_wrist_z(self):
+        report = audit.summarize_target({"a": .1, "b": -.2, "c": .03}, 10., 20., 4.)
+        self.assertAlmostEqual(report["table_contact_base_cm"][2], 0.)
+        point = report["tip_target_base_cm"]
+        height = (point[2] - .1*point[0] + .2*point[1] - 3.) / (1.05**.5)
+        self.assertAlmostEqual(height, 4.)
+        self.assertNotEqual(point[2], 4.)
+        self.assertFalse(report["physical_accuracy_validated"])
+
+    def test_invalid_height_diagnostic_rejected(self):
+        for h in (-1, float("nan"), True):
+            with self.assertRaises(ValueError):
+                audit.summarize_target({"a": 0., "b": 0., "c": 0.}, 0., 20., h)
+
+    def test_reported_tip_applies_mount_offset_and_compares_ruler_height(self):
+        transform = np.eye(4)
+        # Rotate the gripper Y axis into base Z; fingertip adds 10 cm.
+        transform[:3, :3] = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]
+        transform[2, 3] = .03
+        frame = {"receive_age_s": .1, "pose": {"pose_valid": True, "translation_units": "m",
+                 "T_base_gripper": transform.tolist()}}
+        report = audit.summarize_tip({"a": 0., "b": 0., "c": .02}, frame, 10.)
+        self.assertAlmostEqual(report["encoder_height_above_plane_cm"], 11.)
+        self.assertAlmostEqual(report["encoder_minus_measured_cm"], 1.)
+        for age in (2., float("nan"), True):
+            with self.assertRaises(ValueError):
+                audit.summarize_tip({"a": 0., "b": 0., "c": .02}, {**frame, "receive_age_s": age})
+
+    def test_live_height_comparison_only_reads_status(self):
+        status = {**self.camera(), "table_calibration": {"a": 0, "b": 0, "c": 0},
+                  "observations": {"frames": {"stand": {"receive_age_s": .1,
+                      "pose": {"pose_valid": True, "translation_units": "m", "T_base_gripper": np.eye(4).tolist()}}}}}
+        with patch.object(audit.requests, "get", return_value=Mock(json=lambda: status)) as get, \
+             patch.object(audit.requests, "post", side_effect=AssertionError("No writes")), redirect_stdout(io.StringIO()):
+            report = audit.main(["--arm-url", "http://test.invalid", "--measured-tip-height-cm", "0",
+                                 "--target-cm", "0", "24", "--height-cm", "4"])
+        self.assertEqual(report["target_height"]["tip_target_base_cm"], [0., 24., 4.])
+        self.assertEqual(report["fingertip_comparison"]["encoder_minus_measured_cm"], 0.)
+        self.assertFalse(report["motion_allowed"])
+        get.assert_called_once()
+
     def camera(self, count=8):
         pixels = [(0, 0), (160, 0), (0, 120), (160, 120), (80, 0), (80, 120), (0, 60), (160, 60)]
         return {"size": 160, "pairs": [[u, v, u/10, v/10] for u, v in pixels[:count]]}

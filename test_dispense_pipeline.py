@@ -40,12 +40,12 @@ class PipelineTests(unittest.TestCase):
         self.after["chosen"]["mask"][65:105, 110:145] = True
         self.bridge.place.return_value = {"ok": True, "released": True}
 
-    def run_pipeline(self, *, dry_run=False, kind="fetch", after=None):
+    def run_pipeline(self, *, dry_run=False, kind="fetch", after=None, hand=None, stand=None):
         images = {role: self.image for role in ("stand", "hand")}
         stages = [(images, self.status, {r: {"camera_id": r, "sequence": n} for r in images}) for n in range(1, 5)]
         with patch.object(dp.text_pick, "ArmBridge", return_value=self.bridge), \
              patch.object(dp.text_pick, "read_live", side_effect=stages), \
-             patch.object(dp.text_pick.ts, "decide", side_effect=[self.result, self.result, after or self.after]), \
+             patch.object(dp.text_pick.ts, "decide", side_effect=[stand or self.result, hand or self.result, after or self.after]), \
              redirect_stdout(io.StringIO()):
             return self.pipe.run(command(kind, dry_run=dry_run), self.target, dry_run=dry_run)
 
@@ -84,6 +84,44 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(report["status"], "PLACED", report)
         self.assertEqual(self.ocr.call_count, 3)
         self.assertTrue(all(call.args[2] == "Aspirin" for call in self.ocr.call_args_list))
+
+    def test_wrist_target_not_required_for_household_or_medicine_pick(self):
+        for kind in ("fetch", "dispense"):
+            with self.subTest(kind=kind):
+                self.bridge.submit_grasp.reset_mock()
+                self.ocr.reset_mock()
+                report = self.run_pipeline(kind=kind, hand={"status": "NOT_FOUND", "candidates": [], "chosen": None})
+                self.assertEqual(report["status"], "PLACED", report)
+                self.assertEqual(report["hand_target_status"], "NOT_FOUND")
+                self.bridge.submit_grasp.assert_called_once()
+                self.assertEqual(self.ocr.call_count, 2 if kind == "dispense" else 0)
+
+    def test_wrist_ambiguity_does_not_override_unique_stand_target(self):
+        ambiguous = copy.deepcopy(self.result)
+        ambiguous["chosen"] = None
+        ambiguous["status"] = "AMBIGUOUS"
+        ambiguous["candidates"].append(copy.deepcopy(ambiguous["candidates"][0]))
+        report = self.run_pipeline(hand=ambiguous)
+        self.assertEqual(report["status"], "PLACED", report)
+
+    def test_wrist_detection_cannot_rescue_missing_stand_target(self):
+        report = self.run_pipeline(stand={"status": "NOT_FOUND", "candidates": [], "chosen": None})
+        self.assertEqual(report["status"], "EXECUTION_BLOCKED")
+        self.bridge.submit_grasp.assert_not_called()
+
+    def test_supplementary_wrist_ocr_cannot_veto_valid_stand_label(self):
+        self.ocr.side_effect = [.9, .1, .9]
+        report = self.run_pipeline(kind="dispense")
+        self.assertEqual(report["status"], "PLACED", report)
+        self.assertEqual(report["ocr_score"], .9)
+        self.assertEqual(report["hand_ocr"]["score"], .1)
+
+    def test_good_wrist_ocr_cannot_replace_failed_stand_label(self):
+        self.ocr.side_effect = [.1, .99]
+        report = self.run_pipeline(kind="dispense")
+        self.assertEqual(report["status"], "EXECUTION_BLOCKED")
+        self.bridge.submit_grasp.assert_not_called()
+        self.assertEqual(self.ocr.call_count, 1)
 
     def test_unverified_destination_blocks_before_pick(self):
         self.dest["measurements_verified"] = False

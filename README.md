@@ -12,7 +12,7 @@ with the integrated [lospollos-arm](https://github.com/ciloglu44/lospollos-arm) 
 3. Run **SAM 3 (`facebook/sam3`)** on each image to detect matching objects and
    produce their segmentation masks. The default uses SAM confidence for object
    selection, a configured workspace to exclude background targets, and mask
-   quality checks. Missing or ambiguous objects do not trigger a pick.
+   quality checks. A missing or ambiguous standing-camera target does not trigger a pick.
 4. Highlight the object region and report visible area in pixels, a proposed
    grasp point, jaw contacts, and a top or side approach.
 5. With measured calibration and object dimensions/grasp method, propose robot coordinates.
@@ -20,8 +20,14 @@ with the integrated [lospollos-arm](https://github.com/ciloglu44/lospollos-arm) 
 
 The controller keeps acquiring both camera feeds. SAM runs on snapshots
 for each text request; this is **not continuous visual servo control**. The fixed
-camera supplies table localization. The moving hand camera currently provides
-an independent semantic check and close-up proposal, not calibrated depth.
+camera supplies target selection and table localization. Wrist detections are
+supplementary: the wrist does not have to see the target before pickup starts.
+Both live feeds must remain healthy. The wrist does not yet provide calibrated
+depth or corrections during motion. Closing height uses measured item data,
+not the fraction of a segmentation mask's image height.
+
+For the changed camera policy, Z diagnostics and Linux troubleshooting steps,
+see [standing-camera pickup and height](docs/STANDING_FIRST_HEIGHT.md).
 
 **Current limitations:** no hardware pickup has been validated here. Top-grasp
 execution is blocked because wrist-roll control is not implemented. Side pickup
