@@ -2,8 +2,8 @@
 
 This demo records an English request, transcribes it locally with faster-whisper,
 removes phrases such as “please pick the,” and passes the remaining object
-description directly to the existing SAM 3 selector. Ollama Qwen
-checks candidates by default. The result is an annotated photo and `result.json`.
+description directly to the existing SAM 3 selector. SAM-only selection is the
+default; no model server is needed. The result is an annotated photo and `result.json`.
 SELECTED means visual selection only. This program has no arm connection.
 
 From this project directory:
@@ -17,8 +17,8 @@ Repeat for another request; Ctrl+C quits. Grant microphone access to the termina
 or launching app when macOS asks. `--list-devices` lists inputs; `--device N`
 chooses one. The first speech run downloads `base.en` into `.voice_models`.
 
-Use `--vlm none` for SAM-only selection without Ollama. This skips semantic
-verification. `--text "pick the white ring"` bypasses recording and transcription;
+`--vlm none` is the default. There is no independent identity verification in this
+mode. `--text "pick the white ring"` bypasses recording and transcription;
 `--audio recording.wav` tests saved speech. `--once` ends after one recording.
 Outputs default to `review_outputs/voice_demo/` and are replaced each request.
 
@@ -33,7 +33,7 @@ dosing system. `--vocabulary catalog` restores the previous restricted mode
 using names and aliases in `voice_items.json`.
 
 For another computer, install `requirements-voice.txt` in its virtual environment
-and provision SAM 3 weights plus Ollama with `qwen2.5vl:7b`. The requirements are
+and provision SAM 3 weights. Ollama and Qwen are not required. The requirements are
 a snapshot; a clean installation on the friend's computer still needs testing.
 
 The future Reachy integration can pass its transcript to `select_from_text`.

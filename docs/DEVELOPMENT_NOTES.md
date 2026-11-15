@@ -1,5 +1,9 @@
 # Robot vision: offline inspection and grasp planning
 
+Historical development notes. The current deployment defaults to SAM 3 only;
+Ollama/Qwen experiments below are optional past evaluations, not setup requirements.
+Use the repository-root README and LINUX_HANDOFF.md for current instructions.
+
 ## Combined text-to-pick workflow
 
 `text_pick.py` connects typed descriptions, SAM/Qwen selection, object masks and

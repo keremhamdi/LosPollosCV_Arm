@@ -29,15 +29,15 @@ Steps
   5. Dry run by default: prints x, y and saves pick.jpg.  With --go: the arm grabs.
 
 Run (his page must be running:  python -m arm.click --camera ...  ->  http://localhost:8890)
-  python pick_v5.py --target "energy drink can" --category can --vlm ollama          # dry run
-  python pick_v5.py --target "energy drink can" --category can --vlm ollama --go     # grab
+  python pick_v5.py --target "energy drink can" --category can --vlm none          # dry run
+  python pick_v5.py --target "energy drink can" --category can --vlm none --go     # grab
 
 How accurate is the calibration? (no SAM 3, no motion)
   python pick_v5.py --check
   python pick_v5.py --check --calib /path/to/LosPollosForTheElders/calib/camera.json
 
 Grab, then put it down at a fixed table point (needs the 'place' action, see place_snippet_v1.py):
-  python pick_v5.py --target "blue pill box" --category box --vlm ollama --go --place -10 25
+  python pick_v5.py --target "blue pill box" --category box --vlm none --go --place -10 25
 
 Offline test, no arm (uses his calibration file and a saved frame from the same camera):
   python pick_v5.py --image frame.jpg --calib /path/to/LosPollosForTheElders/calib/camera.json \

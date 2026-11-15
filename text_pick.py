@@ -308,7 +308,8 @@ def main(argv=None):
     ap.add_argument("--hand-image", help="saved hand-camera frame of the same stationary scene")
     ap.add_argument("--calib", help="measured stand-camera calibration for saved-image planning")
     ap.add_argument("--category", help="optional broad SAM prompt, e.g. box")
-    ap.add_argument("--vlm", choices=("none", "ollama", "claude"), default="ollama")
+    ap.add_argument("--vlm", choices=("none", "ollama", "claude"), default="none",
+                    help="optional identity checker; default is SAM 3 only, with no model service")
     ap.add_argument("--items", default=str(HERE / "items_v1.json"))
     ap.add_argument("--grasp", choices=("auto", "top", "side"), default="auto")
     ap.add_argument("--height", type=float, help="measured closing height in cm")

@@ -124,7 +124,7 @@ def joint_review(images, results, target):
     return summarize_joint_reviews(reviews)
 
 
-def analyze(stand_path, hand_path, target, category, output_dir, vlm="ollama"):
+def analyze(stand_path, hand_path, target, category, output_dir, vlm="none"):
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     ts.VLM_BACKEND = vlm
@@ -172,7 +172,7 @@ def main():
     ap.add_argument("--hand", required=True)
     ap.add_argument("--target", required=True)
     ap.add_argument("--category")
-    ap.add_argument("--vlm", choices=["ollama", "none"], default="ollama")
+    ap.add_argument("--vlm", choices=["ollama", "none"], default="none")
     ap.add_argument("--vlm-model", default=ts.OLLAMA_MODEL)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()

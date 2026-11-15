@@ -21,7 +21,7 @@ How it works
   5. Draw the best grasps and print the winner.
 
 Run
-  python grasp_planner_v3.py --image top.jpeg --target "blue pill box" --category "box" --vlm ollama
+  python grasp_planner_v3.py --image top.jpeg --target "blue pill box" --category "box" --vlm none
   python grasp_planner_v3.py --image top.jpeg --target "energy drink can" --category "can" --px-per-cm 12 --max-open-cm 6
 
 Best results with a camera looking DOWN at the table (like your stand camera). From a

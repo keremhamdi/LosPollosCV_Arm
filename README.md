@@ -10,14 +10,14 @@ with the integrated [lospollos-arm](https://github.com/ciloglu44/lospollos-arm) 
 1. Read a text description, such as `pick up the white cup`.
 2. Fetch the latest standing and hand images from the NormaCore Station bridge.
 3. Run **SAM 3 (`facebook/sam3`)** on each image to detect matching objects and
-   produce their segmentation masks. Optionally use local Qwen2.5-VL via Ollama
-   to check identity and posture. Missing or ambiguous objects do not trigger a pick.
+   produce their segmentation masks. The default uses SAM confidence for object
+   selection and mask shape for posture. Missing or ambiguous objects do not trigger a pick.
 4. Highlight the object region and report visible area in pixels, a proposed
    grasp point, jaw contacts, and a top or side approach.
 5. With measured calibration and object dimensions, propose robot coordinates.
    `--go` explicitly requests one supported pickup after the checks pass.
 
-The controller keeps acquiring both camera feeds. SAM/Qwen runs on snapshots
+The controller keeps acquiring both camera feeds. SAM runs on snapshots
 for each text request; this is **not continuous visual servo control**. The fixed
 camera supplies table localization. The moving hand camera currently provides
 an independent semantic check and close-up proposal, not calibrated depth.
@@ -32,7 +32,7 @@ clearance and reachability checks. Two cameras alone do not supply 3D geometry.
 The full sequence, including the robot's table setup, is in
 [LINUX_HANDOFF.md](LINUX_HANDOFF.md). Your friend needs the robot's working
 NormaCore checkout, generated protobuf modules, Station and camera configuration;
-those components and SAM/Qwen model weights are not bundled in this repository.
+those components and SAM model weights are not bundled in this repository.
 
 ```bash
 git clone https://github.com/keremhamdi/LosPollosCV_Arm.git
@@ -49,16 +49,17 @@ PyTorch CPU/CUDA build for your Linux hardware if necessary. See
 
 For SAM 3, request access to [facebook/sam3](https://huggingface.co/facebook/sam3),
 then authenticate with `hf auth login` on the Linux laptop. The first inference
-downloads the weights. For the default checker, install
-[Ollama](https://ollama.com/download/linux), start its service and run:
+downloads the weights. **Ollama, Qwen, an API key and a separate model server are
+not required.** SAM 3 runs directly in Python through PyTorch and Transformers.
+`--vlm none` is the default for text, voice, selection and two-view entry points.
 
-```bash
-ollama pull qwen2.5vl:7b
-```
+Optional checker adapters remain available only when explicitly selected;
+see [optional checkers](docs/OPTIONAL_CHECKERS.md). They are outside the default
+installation. Microphone/speech packages are also optional.
 
-`--vlm none` uses SAM alone. `--vlm claude` is optional and sends object crops to
-Anthropic using your configured API key; the default `ollama` runs the checker
-locally. Microphone/speech packages are optional.
+SAM confidence is not a calibrated probability or an independent identity check.
+Without a second checker, exact labels, similar objects and posture inferred from
+an angled silhouette need particular evaluation on your own camera images.
 
 ## Start both camera feeds
 
@@ -83,7 +84,7 @@ From the repository root:
 ```bash
 .venv/bin/python -B text_pick.py \
   --arm-url http://localhost:8890 \
-  --text "pick up the white cup" --category cup --vlm ollama
+  --text "pick up the white cup" --category cup --vlm none
 ```
 
 Omit `--text` to type at a prompt. Results go into a new directory under
@@ -96,7 +97,7 @@ Saved images work without the robot:
 ```bash
 .venv/bin/python -B text_pick.py \
   --image /path/to/stand.jpg --hand-image /path/to/hand.jpg \
-  --text "pick up the white cup" --category cup --vlm ollama
+  --text "pick up the white cup" --category cup --vlm none
 ```
 
 ## Calibration and accuracy
@@ -131,3 +132,5 @@ is intentionally not committed. Synthetic fixtures are labelled tests only.
 
 Provenance is in [NOTICE.md](NOTICE.md) and `controller/UPSTREAM.json`.
 Development details are in `INTEGRATION.md` and `docs/DEVELOPMENT_NOTES.md`.
+See [next improvements](docs/NEXT_STEPS.md) for the SAM-only photo findings and
+the recommended order of calibration, workspace filtering and grasp-control work.

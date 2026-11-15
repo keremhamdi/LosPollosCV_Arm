@@ -14,13 +14,13 @@ Pipeline
 Usage
   python target_selector.py --image table.jpg --target "blue pill box" --category "box"
   python target_selector.py --camera 0 --target "blue pill box" --category "box" --frames 3
-  python target_selector.py --image table.jpg --target "blue pill box" --category "box" --vlm ollama
-     (local checker: install Ollama, then `ollama pull qwen2.5vl:7b`; no API key needed)
+  python target_selector.py --image table.jpg --target "blue pill box" --category "box" --vlm none
+     (default: SAM 3 only; no separate model service needed)
 
-Needs: pip install torch torchvision transformers accelerate anthropic opencv-python numpy pillow
+Needs: pip install -r requirements.txt
        (on a Mac, the standard torch wheel includes Apple GPU / MPS support)
        hf auth login   (after accepting the conditions on huggingface.co/facebook/sam3)
-       export ANTHROPIC_API_KEY=...
+       Optional checkers are described in docs/OPTIONAL_CHECKERS.md.
 """
 import os
 # On Apple Silicon, let any op that MPS doesn't support fall back to CPU instead of crashing.
@@ -118,7 +118,7 @@ def to_b64(im: Image.Image):
     buf = io.BytesIO(); im.convert("RGB").save(buf, format="JPEG", quality=90)
     return base64.b64encode(buf.getvalue()).decode()
 
-VLM_BACKEND = "claude"          # set by --vlm
+VLM_BACKEND = "none"            # SAM-only unless a checker is explicitly requested
 OLLAMA_MODEL = "qwen2.5vl:7b"   # set by --vlm-model
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
@@ -334,8 +334,8 @@ if __name__ == "__main__":
     ap.add_argument("--target", required=True); ap.add_argument("--category")
     ap.add_argument("--frames", type=int, default=1)
     ap.add_argument("--out", default="decision.jpg")
-    ap.add_argument("--vlm", choices=["claude", "ollama", "none"], default="claude",
-                    help="who checks each candidate: Claude API or a local Ollama model")
+    ap.add_argument("--vlm", choices=["claude", "ollama", "none"], default="none",
+                    help="SAM-only by default; optional checkers require explicit setup")
     ap.add_argument("--vlm-model", default=OLLAMA_MODEL, help="Ollama model name")
     ap.add_argument("--px-per-cm", type=float, help="image scale at the table, to report cm")
     ap.add_argument("--style", choices=["sam3", "simple"], default="sam3",

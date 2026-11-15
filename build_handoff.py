@@ -8,7 +8,8 @@ ROOT = Path(__file__).resolve().parent
 ROOT_FILES = """
 README.md INTEGRATION.md LINUX_HANDOFF.md VOICE_DEMO.md
 CALIBRATION.md NOTICE.md docs/DEVELOPMENT_NOTES.md .gitignore
-requirements.txt requirements-voice.txt requirements-test.txt
+requirements.txt requirements-voice.txt requirements-test.txt requirements-checkers.txt
+docs/OPTIONAL_CHECKERS.md docs/NEXT_STEPS.md
 calibration_report.py test_calibration_report.py
 text_pick.py arm_bridge.py target_selector_v5.py target_selector_v3.py grasp_planner_v3.py
 pick_v5.py voice_pick.py voice_items.json items_v1.json

@@ -2,6 +2,7 @@
 import argparse
 import base64
 import copy
+from contextlib import redirect_stdout
 import io
 import json
 from pathlib import Path
@@ -160,6 +161,30 @@ class LiveTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_default_cli_uses_sam_and_never_calls_checker_or_controller(self):
+        image, result, _, profile = fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image.save(root / "frame.jpg")
+            (root / "items.json").write_text(json.dumps({"test bottle": profile}))
+            with patch.object(workflow.ts, "sam3_candidates", return_value=result["candidates"]), \
+                 patch.object(workflow.ts, "vlm_check", side_effect=AssertionError("No checker allowed")), \
+                 patch.object(workflow.ts, "ollama_check", side_effect=AssertionError("No Ollama allowed")), \
+                 patch.object(workflow, "ArmBridge", side_effect=AssertionError("No arm allowed")), \
+                 patch("requests.sessions.Session.request", side_effect=AssertionError("No network allowed")), \
+                 redirect_stdout(io.StringIO()):
+                code = workflow.main(["--image", str(root / "frame.jpg"),
+                                      "--hand-image", str(root / "frame.jpg"),
+                                      "--text", "pick up the test bottle", "--items", str(root / "items.json"),
+                                      "--out", str(root / "output")])
+            self.assertEqual(code, 0)
+            report = json.loads(next((root / "output").glob("*/result.json")).read_text())
+            for view in (report, report["hand_view"]):
+                self.assertTrue(view["object_present"])
+                self.assertIn("SAM only", view["selection"]["candidates"][0]["vlm"]["reason"])
+                self.assertTrue(view["posture"]["basis"].startswith("mask is"))
+            self.assertFalse(report["motion_attempted"])
+
     def args(self, root, **kw):
         return argparse.Namespace(text="pick up the test bottle", image=str(root / "frame.jpg"),
                                   arm_url=None, hand_image=str(root / "frame.jpg"),

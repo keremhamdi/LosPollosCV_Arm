@@ -194,7 +194,7 @@ class VisionTests(unittest.TestCase):
             results = [{"status": "NOT_FOUND", "candidates": [], "chosen": None},
                        {"status": "GO", "candidates": [candidate], "chosen": candidate}]
             with patch.object(ts, "decide", side_effect=results), patch.object(two_view, "joint_review", return_value={"match": True}), patch.object(ts, "VLM_BACKEND", "ollama"):
-                report = two_view.analyze(img, img, "cup", None, root / "result")
+                report = two_view.analyze(img, img, "cup", None, root / "result", vlm="ollama")
             self.assertEqual(report["status"], "NEEDS_REVIEW")
             self.assertFalse(report["motion_allowed"])
             self.assertFalse(report["metric_3d_available"])

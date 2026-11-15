@@ -4,7 +4,7 @@ This folder combines Robot_Vision with the modified lospollos-arm controller at
 upstream commit `c8b9797754ff0dbd4f1074ce155c11d3d4378062`. Run `text_pick.py` for the
 new combined workflow. The controller stays in `controller/`.
 
-Type an object description → SAM 3 masks → optional Qwen identity check → unique
+Type an object description → SAM 3 masks and scores → unique
 object selection → proposed jaw contacts and approach → optional HTTP pickup.
 
 The standing camera supplies approximate table coordinates. The integrated hand
@@ -28,9 +28,11 @@ python -B -m unittest -q test_vision test_integration test_voice_pick test_text_
 Install the Torch build suitable for the Linux machine's CPU/CUDA setup if the
 snapshot is not compatible. SAM 3 needs access to `facebook/sam3` on Hugging Face,
 including its access agreement, credentials for the first download and sufficient
-memory. Qwen checking uses the separate Ollama service with `qwen2.5vl:7b` installed.
-`--vlm none` skips Qwen and uses SAM confidence only. The speech packages are not
-needed for text input.
+memory. **No Ollama installation, Qwen model, API key or model server is needed.**
+The default is `--vlm none`: SAM runs directly in Python, selection uses SAM scores,
+and posture uses the mask silhouette. Optional checker adapters are described
+separately in `docs/OPTIONAL_CHECKERS.md` and run only when explicitly selected.
+The speech packages are not needed for text input.
 
 Point `NORMA_CORE` to the existing checkout. It must include the generated Station
 protobuf modules and `hardware/elrobot/simulation/elrobot_follower.urdf`.
@@ -96,7 +98,7 @@ From the project root, with the above controller running:
 ```bash
 .venv/bin/python -B text_pick.py \
   --arm-url http://localhost:8890 \
-  --text "pick up the blue pill box" --category box --vlm ollama
+  --text "pick up the blue pill box" --category box --vlm none
 ```
 
 Omit `--text` to get a typing prompt. There is no arm movement without `--go`.
@@ -109,7 +111,7 @@ To test saved images on either laptop, no controller or calibration is needed:
 ```bash
 .venv/bin/python -B text_pick.py \
   --image /path/to/stand.jpg --hand-image /path/to/hand.jpg \
-  --text "pick up the energy drink can" --category can --vlm ollama
+  --text "pick up the energy drink can" --category can --vlm none
 ```
 
 Use original images of the same stationary scene. Add `--calib /path/to/camera.json`
@@ -167,7 +169,7 @@ project root, explicitly add `--go` to a live command:
 ```bash
 .venv/bin/python -B text_pick.py \
   --arm-url http://localhost:8890 --text "your measured object" \
-  --items /path/to/measured_items.json --vlm ollama --go
+  --items /path/to/measured_items.json --vlm none --go
 ```
 
 `--go` is the execution request; there is no second confirmation prompt. Missing,

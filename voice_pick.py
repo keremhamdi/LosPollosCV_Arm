@@ -76,7 +76,7 @@ def describe_item(text):
     return {"status": "MATCHED", "target": target, "category": None}
 
 
-def select_from_text(text, image_path, items, output, vlm="ollama", selector=None,
+def select_from_text(text, image_path, items, output, vlm="none", selector=None,
                      vocabulary="open"):
     """Reusable entry point for a future Reachy text request. Never commands motion."""
     import target_selector_v5 as ts
@@ -150,7 +150,7 @@ def main(argv=None):
     parser.add_argument("--items", default=str(HERE / "voice_items.json"))
     parser.add_argument("--vocabulary", choices=["open", "catalog"], default="open",
                         help="open descriptions by default; catalog restores the original restricted demo")
-    parser.add_argument("--vlm", choices=["none", "ollama"], default="ollama")
+    parser.add_argument("--vlm", choices=["none", "ollama"], default="none")
     parser.add_argument("--out", default=str(HERE / "review_outputs" / "voice_demo"))
     parser.add_argument("--whisper-model", default="base.en")
     parser.add_argument("--seconds", type=float, default=6)
