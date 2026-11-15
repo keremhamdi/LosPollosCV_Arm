@@ -216,3 +216,28 @@ set to a top grasp, is answered with `NEEDS_CLARIFICATION` and nothing moves.
 The form also supplies the broad SAM prompt (`box`, `blister pack`,
 `pill bottle`) when the item has no `category`. OCR on reflective foil and
 picking a strip a few millimetres high have not been tried on the real arm.
+
+## Basic mode (the pick that already works on the arm)
+
+`--basic` connects Reachy's requests to the simple pick used by `grab_text.py`:
+find the thing in the fixed camera, grab it from the top, put it down at a spot
+you give, park. It presses the arm page's own buttons, so start the arm page
+first, without `--read-only`, follower on (Self-controlled), Hold arm pressed.
+
+```bash
+python arm_service.py --basic --bowl -20 15 --handover -5 30 --host 0.0.0.0
+```
+
+That previews only: it finds the object and reports where, nothing moves. Add
+`--enable-motion` to let confirmed requests move the arm.
+
+| | Basic mode | Full mode (default) |
+|---|---|---|
+| Needs | arm page, `--bowl` / `--handover` in table cm | workspace, validation, measured destinations, item profiles |
+| Medicine | found by the name written on it (EasyOCR), else by its look; no `medicine_names` entry needed | must be mapped in the items file and pass the label check |
+| Several look-alikes | takes the best match | refuses as ambiguous |
+| After release | not checked; `place_verified` is `false`, `ok` is `true` | checked by camera before `ok` is `true` |
+
+Reading labels needs `pip install easyocr` once. Without it medicines are found
+by their look only. Safety refusals (sharps, hot items, loose pills), the spoken
+yes on Reachy's side and the one-job-at-a-time journal apply in both modes.

@@ -150,7 +150,9 @@ class Reacher:
         out = {}
         for motor, name in MOTOR_JOINTS.items():
             j = self.arm.joints[motor]
-            out[name] = self._angle(motor, j.goal if j.torque else j.raw)
+            # holding: its target (minus any push that makes up for sag), else where it is
+            sag = getattr(self.arm, "sag", {}).get(motor, 0) if j.torque else 0
+            out[name] = self._angle(motor, (j.goal - sag) if j.torque else j.raw)
         return out
 
     # ---------- forward ----------
@@ -270,9 +272,10 @@ class Reacher:
         self._check_floor(path, target_h_cm)
         return path
 
-    def plan_line(self, x_cm, y_cm, h_cm):
+    def plan_line(self, x_cm, y_cm, h_cm, partial=False):
         """The tip travels in a straight line and the gripper keeps the direction it has now.
-        For going down onto an object and lifting it."""
+        For going down onto an object and lifting it. With partial=True, a line the arm can't
+        finish returns the part it can do (for lifting: as high as possible) instead of failing."""
         if h_cm < MIN_TIP_HEIGHT:
             raise Unreachable(f"Height {h_cm} cm is below the minimum of {MIN_TIP_HEIGHT} cm above the table.")
         target = self._target(x_cm, y_cm, h_cm)
@@ -284,6 +287,8 @@ class Reacher:
             pos = tuple(p0[k] + (target[k] - p0[k]) * i / steps for k in range(3))
             q, perr, derr = self.solve(q, pos, d0)
             if perr > POS_TOL or derr > DIR_TOL:
+                if partial and path:
+                    break
                 raise Unreachable(f"Can't follow a straight line to x={x_cm:.1f}, y={y_cm:.1f}, height={h_cm:g} "
                                   f"(stuck {i / steps:.0%} along the way). Too far, or a joint limit.")
             path.append(q)
@@ -320,6 +325,35 @@ class Reacher:
             raise RuntimeError(
                 f"The arm stopped before its target (joints {off} are far off). Either something blocks it "
                 "(table, object, cable), or the follower is on mirroring instead of (Self-controlled).")
+
+    async def lift(self, x_cm, y_cm, h_cm, seconds=None, cm_per_s=5.0):
+        """Go up to h_cm above x, y, e.g. after closing on an object.
+
+        Straight up keeps the gripper's current angle. After closing on something, that angle is
+        often a few degrees off the plan (the load pulls the arm down), and the top of the line
+        can then be out of reach. So if the straight line can't be done whole: straight up as far
+        as it goes, then the rest of the way with whatever lean reaches it."""
+        try:
+            up = self.plan_line(x_cm, y_cm, h_cm)
+        except Unreachable:
+            up = None
+        if up is not None:   # the normal case: straight up all the way
+            await self.follow(up, seconds or self.duration(up))
+            return
+        start_h = self.state()[2]
+        up = self.plan_line(x_cm, y_cm, h_cm, partial=True)
+        await self.follow(up, max(1.5, (h_cm - start_h) / cm_per_s))
+        now_h = self.state()[2]
+        if now_h >= h_cm - 0.7:
+            return
+        try:
+            (q,), _ = self.pose_for(x_cm, y_cm, [h_cm])
+            rest = self.plan_swing(q, h_cm)
+        except Unreachable:
+            if now_h - start_h >= 3.0:   # well off the table: good enough, stay here
+                return
+            raise
+        await self.follow(rest, max(1.0, (h_cm - now_h) / cm_per_s))
 
     def plan(self, x_cm, y_cm, h_cm, tilt=None, line=False):
         """Returns (path, tilt used or None for a straight line)."""
@@ -364,8 +398,7 @@ class Reacher:
         await asyncio.sleep(0.3)
         g = arm.joints[GRIPPER_ID]
         holding = abs(g.raw - g.raw_for(close_pct)) > BLOCKED_STEPS
-        up = self.plan_line(x_cm, y_cm, above_h)
-        await self.follow(up, max(1.5, (above_h - grab_h) / 5))
+        await self.lift(x_cm, y_cm, above_h, seconds=max(1.5, (above_h - grab_h) / 5))   # about 5 cm/s
         return holding
 
 
@@ -411,7 +444,7 @@ class Reacher:
         await asyncio.sleep(0.3)
         g = arm.joints[GRIPPER_ID]
         holding = abs(g.raw - g.raw_for(close_pct)) > BLOCKED_STEPS
-        await self.follow(self.plan_line(x_cm, y_cm, grab_h + lift_cm), 1.5)
+        await self.lift(x_cm, y_cm, grab_h + lift_cm, seconds=1.5)
         return holding
 
 

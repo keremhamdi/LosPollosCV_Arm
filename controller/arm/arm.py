@@ -75,6 +75,8 @@ SEND_RATE_HZ = 25  # how often we send goal updates during a move
 
 GRIPPER_ID = 8
 BLOCKED_STEPS = 40     # a joint ending further than this from its target counts as blocked
+SAG_TOL = 10           # steps (~1 deg): closer than this to the target counts as arrived
+MAX_SAG_PUSH = 150     # steps (~13 deg): most we aim past a target to make up for the arm sagging
 GRIPPER_SQUEEZE = 40   # how far past the contact point the gripper keeps pushing (light grip)
 GRIPPER_DEADBAND = 60  # gripper target this close to where it is: leave the gripper alone
 
@@ -129,6 +131,7 @@ class Arm:
         self.last_update = 0.0
         self.joint_updated_at: dict[int, float] = {}
         self._holding = False
+        self.sag: dict[int, int] = {}   # per joint: how far past its target it is held (sag correction)
         self._client = None
         self._tasks: list[asyncio.Task] = []
         self._error: Exception | None = None
@@ -248,6 +251,8 @@ class Arm:
         """
         ids = list(self.joints)
         off = [i for i in ids if not self.joints[i].torque]
+        for i in off:
+            self.sag.pop(i, None)
         if off:
             await self._write([(i, GOAL_POSITION, self.joints[i].raw.to_bytes(2, "little")) for i in off])
         await self._write(
@@ -295,6 +300,32 @@ class Arm:
         keeps a light squeeze so it doesn't drop what it holds.
         """
         await self._wait_settled(list(end))
+        # Make up for sag first: under the arm's own weight (more when the servos are warm, the arm
+        # reaches far, or it holds something) shoulder and elbow stop a few degrees short and the
+        # servo doesn't push the last bit. Aim past the target by what's missing, up to twice.
+        # A joint that still doesn't get there after that is really blocked: eased off below.
+        aim = dict(end)
+        for _ in range(2):
+            pushes = []
+            for i, target in end.items():
+                if i == GRIPPER_ID:
+                    continue
+                j = self.joints[i]
+                off = target - j.raw
+                if abs(off) <= SAG_TOL:
+                    continue
+                new = max(target - MAX_SAG_PUSH, min(target + MAX_SAG_PUSH, aim[i] + off))
+                new = max(j.range_min, min(j.range_max, new))
+                if new != aim[i]:
+                    aim[i] = new
+                    pushes.append((i, GOAL_POSITION, int(new).to_bytes(2, "little")))
+            if not pushes:
+                break
+            await self._write(pushes)
+            await self._wait_settled([p[0] for p in pushes])
+        for i, target in end.items():
+            if i != GRIPPER_ID:
+                self.sag[i] = aim[i] - target   # how far past the target this joint is held
         eases = []
         for i, target in end.items():
             j = self.joints[i]
@@ -307,6 +338,7 @@ class Arm:
             else:
                 log.warning("joint %d blocked %d steps short of target, easing off", i, abs(off))
                 push = 0
+                self.sag[i] = 0
             eases.append((i, GOAL_POSITION, (j.raw + push).to_bytes(2, "little")))
         if eases:
             await self._write(eases)

@@ -344,9 +344,9 @@ class App:
             self.log = "Parking..."
             try:
                 x, y, h, _ = r.state()
-                if h < 10:  # first straight up, so nothing sweeps along the table
+                if h < 10:  # first up, so nothing sweeps along the table
                     try:
-                        await r.goto(x, y, 12, line=True)
+                        await r.lift(x, y, 12)
                     except Unreachable:
                         pass
                 path = r.plan_swing(q, park_h)
@@ -375,7 +375,7 @@ class App:
                 await r.goto(x, y, above)                     # carry it over, staying high
                 await r.goto(x, y, height, line=True)         # straight down
                 await self.arm.move({GRIPPER_ID: 100}, 0.8)   # let go
-                await r.goto(x, y, above, line=True)          # straight back up
+                await r.lift(x, y, above)                     # back up
                 self.log = f"Placed at x={x:.1f}, y={y:.1f}."
             finally:
                 self.busy = False

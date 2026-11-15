@@ -80,9 +80,9 @@ def result_for(body, **updates):
 
 
 class Service:
-    def __init__(self, items, *, pipeline=None, fake=False, enable_motion=False,
+    def __init__(self, items, *, pipeline=None, fake=False, enable_motion=False, basic=False,
                  journal="config/local/reachy_requests.sqlite3"):
-        self.items, self.pipeline = items, pipeline
+        self.items, self.pipeline, self.basic = items, pipeline, basic
         self.fake, self.enable_motion = fake, enable_motion
         self.lock, self.journal = threading.Lock(), Path(journal)
         self.journal.parent.mkdir(parents=True, exist_ok=True)
@@ -101,7 +101,7 @@ class Service:
             connection.close()
 
     def health(self):
-        return {"ok": True, "schema": SCHEMA, "fake": self.fake, "enable_motion": self.enable_motion,
+        return {"ok": True, "schema": SCHEMA, "fake": self.fake, "enable_motion": self.enable_motion, "basic": self.basic,
                 "busy": self.lock.locked(), "vision_backend": "sam3", "vlm": "none",
                 "consent_source": "trusted Medicine Buddy voice guard", "routes": list(ROUTES)}
 
@@ -210,6 +210,11 @@ class Service:
 
     def run_object(self, body, name, kind, destination):
         target = resolve_target(name, self.items, medicine=kind == "dispense")
+        if self.basic and kind == "dispense" and target["status"] == "NEEDS_CLARIFICATION":
+            # Basic mode needs no item profile: the medicine is found by the name written on it.
+            target = {"status": "RESOLVED", "target": " ".join(name.split()), "description": name, "category": None,
+                      "form": None, "sam_prompts": [], "profile_matched": False,
+                      "basis": "basic mode: name read on the object, else its look"}
         if target["status"] != "RESOLVED":
             return result_for(body, error="UNSUPPORTED_OBJECT" if target["status"] == "REFUSED" else "NEEDS_CLARIFICATION",
                               detect_detail=target["reason"], resolution=target)
@@ -218,7 +223,10 @@ class Service:
             return result_for(body, error="FAKE_MODE", detect_detail="Text resolved only; no images were processed and nothing moved",
                               resolution=target, dry_run=True, preview_only=True)
         report = self.pipeline.run(body, target, dry_run=dry_run, destination=destination)
-        placed = not dry_run and report.get("status") == "PLACED" and report.get("place_verified") is True
+        verified = report.get("place_verified") is True
+        # Basic mode has no camera check after release: a completed release counts as placed,
+        # and place_verified stays false so the caller can tell.
+        placed = not dry_run and report.get("status") == "PLACED" and (verified or (self.basic and report.get("released") is True))
         selected = report.get("selection", {}).get("status") == "GO"
         detail = report.get("placement_detail") or report.get("error") or "; ".join(report.get("execution_blocks", [])) or ("" if dry_run else report["status"])
         if dry_run:
@@ -227,7 +235,7 @@ class Service:
         return result_for(body, ok=placed if kind != "locate" else selected,
             final_state="placed" if placed else "aborted" if dry_run else "failed",
             label=body["medicine"]["name"] if kind == "dispense" and placed else None,
-            score=report.get("ocr_score"), place_verified=placed, detect_detail=detail,
+            score=report.get("ocr_score"), place_verified=placed and verified, detect_detail=detail,
             error=None if placed or (kind == "locate" and selected) else "DRY_RUN" if dry_run else report.get("status", "FAILED"),
             motion_attempted=report.get("motion_attempted", False), dry_run=dry_run, preview_only=dry_run,
             requires_operator_review=report.get("motion_attempted") is True and report.get("status") in ("MOTION_RESULT_UNKNOWN", "PLACE_UNVERIFIED"),
@@ -294,6 +302,13 @@ def main():
     parser.add_argument("--out", default="review_outputs/reachy")
     parser.add_argument("--journal", default="config/local/reachy_requests.sqlite3")
     parser.add_argument("--fake", action="store_true", help="text/protocol test only; no model or arm")
+    parser.add_argument("--basic", action="store_true",
+                        help="simple pick through the arm page's buttons: no workspace, validation or item profiles")
+    parser.add_argument("--bowl", nargs=2, type=float, metavar=("X", "Y"), help="basic: where the bowl stands, table cm")
+    parser.add_argument("--handover", nargs=2, type=float, metavar=("X", "Y"), help="basic: hand-over spot, table cm")
+    parser.add_argument("--close", type=float, default=5.0, help="basic: jaws close this high above the table, cm")
+    parser.add_argument("--above", type=float, default=14.0, help="basic: approach and carry height, cm")
+    parser.add_argument("--place-height", type=float, default=8.0, help="basic: let go this high above the table, cm")
     parser.add_argument("--enable-motion", action="store_true", help="allow confirmed Buddy live requests after all gates")
     parser.add_argument("--acknowledge-unknown", metavar="REQUEST_ID", help="after checking the arm, retire an unresolved request without retrying; then exit")
     args = parser.parse_args()
@@ -301,15 +316,23 @@ def main():
         Service({}, journal=args.journal).acknowledge_unknown(args.acknowledge_unknown)
         print("Unknown outcome acknowledged; no request replayed and no arm connection made.")
         return
-    if args.enable_motion and (args.fake or args.image or not all((args.workspace, args.validation, args.destinations))):
+    if args.basic and args.enable_motion and (args.fake or not (args.bowl or args.handover)):
+        parser.error("Basic motion needs --bowl X Y and/or --handover X Y")
+    if not args.basic and args.enable_motion and (args.fake or args.image or not all((args.workspace, args.validation, args.destinations))):
         parser.error("Motion needs live cameras, workspace, validation and measured destinations")
     items = json.loads(Path(args.items).read_text())
     pipeline = None
-    if not args.fake:
+    if args.basic and not args.fake:
+        from basic_pipeline import BasicPipeline
+        places = {k: v for k, v in (("bowl", args.bowl), ("handover", args.handover)) if v}
+        pipeline = BasicPipeline(arm_url=args.arm_url, places=places, close=args.close, above=args.above,
+                                 place_height=args.place_height)
+    elif not args.fake:
         from dispense_pipeline import Pipeline
         pipeline = Pipeline(arm_url=args.arm_url, items=args.items, workspace=args.workspace, validation=args.validation,
                             destinations=args.destinations, out=args.out, image=args.image, hand_image=args.hand_image)
-    service = Service(items, pipeline=pipeline, fake=args.fake, enable_motion=args.enable_motion, journal=args.journal)
+    service = Service(items, pipeline=pipeline, fake=args.fake, enable_motion=args.enable_motion, basic=args.basic,
+                      journal=args.journal)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(service))
     print(f"Reachy arm service at http://{args.host}:{server.server_port}; SAM-only; motion enabled={args.enable_motion}", flush=True)
     try:

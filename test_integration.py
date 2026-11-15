@@ -297,6 +297,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.reacher.pose_for = Mock()
         self.reacher.goto = AsyncMock()
         self.arm.move = AsyncMock()
+        self.reacher.lift = AsyncMock()
         body = {"x": 1, "y": 2, "height": 3, "above": 15}
         checked = await self.app.api("validate_place", body)
         self.assertEqual(checked, {"reachable": True, "motion_attempted": False})
@@ -305,7 +306,8 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         placed = await self.app.api("place", body)
         self.assertTrue(placed["released"])
         self.assertFalse(placed["place_verified"])
-        self.assertEqual(self.reacher.goto.await_count, 3)
+        self.assertEqual(self.reacher.goto.await_count, 2)
+        self.reacher.lift.assert_awaited_once_with(1, 2, 15)   # back up, as far as the arm can
         self.arm.move.assert_awaited_once()
 
     async def test_place_rejects_pending_calibration_and_stale_feedback(self):
