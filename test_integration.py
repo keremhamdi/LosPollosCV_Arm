@@ -264,7 +264,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_normal_text_request_reaches_controller_with_numeric_grip_height(self):
         import grab_text
         with patch.object(grab_text, 'find_and_grab') as pick, redirect_stdout(io.StringIO()):
-            grab_text.main(['--text','small white cylinder'])
+            grab_text.main(['--basic','--text','small white cylinder'])
         args, args_text = pick.call_args.args
         args.last_text = args_text
         self.app.camera.locate = Mock(return_value=(3.66,28.84))
@@ -314,7 +314,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         import grab_text
         from unittest.mock import mock_open
         with patch.object(grab_text, 'find_and_grab') as pick, redirect_stdout(io.StringIO()):
-            grab_text.main(['--text', 'small bottle', '--hand'])
+            grab_text.main(['--basic', '--text', 'small bottle', '--hand'])
         args, text = pick.call_args.args
         args.last_text = text
         img = Image.new('RGB', (1280, 720))

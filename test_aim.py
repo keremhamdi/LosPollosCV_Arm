@@ -199,15 +199,15 @@ class HandCameraTests(unittest.TestCase):
             return sim.Reply(self.world.goto(json["x"], json["y"], json["height"], json.get("tilt"))
                              if name == "goto" else {"ok": True})
 
-        def find(a, text, near=None, tries=3):
+        def find(a, text, near=None, close_enough=None, tries=3):
             p = self.world.pixel() if self.sees else None
-            if p is None:
+            if p is None or (close_enough is not None and not close_enough(np.array(p))):
                 return None, "picture", None
             return (p[0] + self.rng.normal(0, 0.7), p[1] + self.rng.normal(0, 0.7)), "picture", {"mask": None}
 
         answers = itertools.cycle(["", "3", ""])             # jaws around it; 3 cm tall; arm may move
         for target, name, value in ((G, "HAND_FILE", os.path.join(folder.name, "hand.json")),
-                                    (G.requests, "post", post), (G, "find_in_hand", find),
+                                    (G.requests, "post", post), (G, "find_in_hand", find), (P, "find_hand", find),
                                     (G.requests, "get", lambda url, **_: sim.Reply({"tip": [2.0, 20.0, 0.4]})),
                                     (G, "save_hand_view", lambda *a, **k: None)):
             p = patch.object(target, name, value)
@@ -266,7 +266,7 @@ class HandCameraTests(unittest.TestCase):
         self.assertTrue(all(not info["lean_aware"] for _, _, info in results))
         self.assertTrue(all(err < 0.45 for err, tilt, _ in results if tilt == 0))
         self.assertTrue(all(err > 1.5 for err, tilt, _ in results if tilt >= 10))
-        self.assertIn("Run handcal once with --precise", sys.stdout.getvalue())
+        self.assertIn("Run handcal once more", sys.stdout.getvalue())
 
     def test_it_looks_with_the_setups_lean_where_the_arm_can(self):
         self.setup()
@@ -292,6 +292,12 @@ class HandCameraTests(unittest.TestCase):
         self.assertEqual(P.hand_align(self.a, "thing", 5.0, 25.0, 3.0), (5.0, 25.0, {"used": False, "lean_aware": False}))
         self.assertEqual(self.world.moves, [])
 
+    def test_something_far_from_where_the_object_must_be_is_not_taken_for_it(self):
+        self.setup()
+        self.world.obj = np.array((-8.0, 16.0, 3.0))
+        x, y, info = P.hand_align(self.a, "thing", -8.0 + 9.5, 16.0, 3.0)     # 9.5 cm off: can't be the object
+        self.assertEqual((x, y, info["used"]), (1.5, 16.0, False))
+
     def test_an_older_arm_page_that_does_not_say_the_lean_still_works(self):
         self.world.says_lean = False
         cal = self.setup()
@@ -312,6 +318,7 @@ class Table:
         self.things, self.tolerance = dict(things), tolerance
         self.posts, self.asked, self.status = [], [], {"read_only": False, "pending": None, "log": "done"}
         self.miss_first = 0
+        self.arm_short = 0.0                                 # cm the real arm stops short of where it is sent
         self.miss_report = {"contact": True, "met_at_cm": 0.1, "jaws_gap_cm": 0.0}   # what a miss looks like
         self.park_ok = True
         jpeg = io.BytesIO()
@@ -319,7 +326,8 @@ class Table:
         self.jpeg = jpeg.getvalue()
         for target, name, value in ((G.requests, "get", self.get), (G.requests, "post", self.post),
                                     (G.ts, "decide", self.decide), (G, "show_view", lambda *a, **k: None),
-                                    (G, "HAND_FILE", "no/such/hand.json")):
+                                    (G, "HAND_FILE", "no/such/hand.json"), (P, "AIM_FILE", "no/such/aim.json"),
+                                    (P, "_session", {"reach": 0.0})):
             p = patch.object(target, name, value)
             p.start()
             test.addCleanup(p.stop)
@@ -334,12 +342,20 @@ class Table:
         if name == "grab":
             if self.status.get("refuse"):
                 return sim.Reply({"ok": False, "error": self.status["refuse"]})
-            near = [n for n, p in self.things.items()
-                    if np.hypot(*(p[:, :2].mean(axis=0) - [json["x"], json["y"]])) <= self.tolerance]
+            # where the jaws really come down: this arm may stop short of where it is sent
+            r = np.array([json["x"], json["y"] - sim.BASE[1]])
+            real = np.array([json["x"], json["y"]]) - self.arm_short * r / np.linalg.norm(r)
+            off = {n: float(np.hypot(*(p[:, :2].mean(axis=0) - real))) for n, p in self.things.items()}
+            near = [n for n, d in off.items() if d <= self.tolerance]
             got = bool(near) and self.miss_first <= 0
             self.miss_first -= 1
+            report = self.miss_report
+            under_a_fingertip = [n for n, d in off.items() if self.tolerance < d <= 3.0]
+            if not got and not near and under_a_fingertip:    # a little off: a fingertip comes down on its top
+                report = {"contact": True, "jaws_gap_cm": 0.0,
+                          "met_at_cm": float(self.things[under_a_fingertip[0]][:, 2].max())}
             return sim.Reply({"ok": True, "holding": got, "report": (
-                {"contact": True, "met_at_cm": 0.1, "jaws_gap_cm": 2.0} if got else self.miss_report)})
+                {"contact": True, "met_at_cm": 0.1, "jaws_gap_cm": 2.0} if got else report)})
         if name == "park":
             return sim.Reply({"ok": self.park_ok, "error": None if self.park_ok else "No park pose yet."})
         return sim.Reply({"ok": True, "tilt": 0})
@@ -457,6 +473,51 @@ class GrabFlowTests(unittest.TestCase):
         self.assertIsNone(P.find_and_grab(self.a, "bottle cap"))
         self.assertEqual(self.table.posts, [])
 
+    def test_an_arm_that_stops_short_is_found_out_by_the_second_grab_and_remembered(self):
+        self.table.arm_short = 1.0
+        res = P.find_and_grab(self.a, "bottle cap")
+        self.assertEqual((res["holding"], res["attempts"], res["reach"]), (True, 2, 1.0))
+        first, second = (body for name, body in self.table.posts if name == "grab")
+        reach = lambda b: np.hypot(b["x"], b["y"] - 4.2)
+        self.assertAlmostEqual(reach(second) - reach(first), 1.0, delta=0.05)
+        self.assertIn("Got it with 1 cm extra reach", sys.stdout.getvalue())
+        self.table.posts.clear()                             # the next grab starts with what worked
+        res = P.find_and_grab(self.a, "bottle cap")
+        self.assertEqual((res["holding"], res["attempts"], self.table.names()), (True, 1, ["grab"]))
+        self.table.arm_short = 0.0                           # ... and if that guess stops working, back to none
+        self.table.posts.clear()
+        res = P.find_and_grab(self.a, "bottle cap")
+        self.assertEqual((res["holding"], res["attempts"], res["reach"]), (True, 2, 0.0))
+
+    def test_a_reach_you_give_or_measured_is_never_second_guessed(self):
+        self.table.arm_short, self.a.reach_out = 1.0, 0.0
+        res = P.find_and_grab(self.a, "bottle cap")
+        grabs = [body for name, body in self.table.posts if name == "grab"]
+        self.assertEqual((res["holding"], res["reach"], len(grabs)), (False, None, 2))
+        self.assertEqual((grabs[0]["x"], grabs[0]["y"]), (grabs[1]["x"], grabs[1]["y"]))
+
+    def test_aimcheck_measures_the_offset_once_and_every_grab_then_uses_it(self):
+        self.table.arm_short = 1.2
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        answers = iter(["", "out 1", "sideways 3", "out 9", "out 0.2", "left 0.3", "right 0.3", ""])
+        with patch.object(P, "AIM_FILE", os.path.join(folder.name, "calib", "aim.json")), \
+                patch("builtins.input", lambda *a: next(answers)):
+            P.aim_check(self.a, "bottle cap")
+            moves = [body for name, body in self.table.posts if name == "goto"]
+            self.assertEqual(self.table.names()[0], "release")
+            self.assertEqual([m["height"] for m in moves[:2]], [14.0, moves[1]["height"]])
+            self.assertTrue(2.0 <= moves[1]["height"] <= 4.0)                 # open jaws just above the cap, not on it
+            self.assertEqual(P.aim_checks(), [{"at": P.aim_checks()[0]["at"], "out": 1.2, "left": 0.0}])
+            out, left = P.aim_offset(4.0, 30.0)
+            self.assertAlmostEqual(out, 1.2, delta=0.01)
+            self.table.posts.clear()
+            res = P.find_and_grab(self.a, "bottle cap")                       # first grab, no guessing
+            self.assertEqual((res["holding"], res["attempts"], res["reach"]), (True, 1, None))
+            self.assertIn("aim check", sys.stdout.getvalue())
+            P.aim_check(self.a, "clear")
+            self.assertIsNone(P.aim_offset(4.0, 30.0))
+
     def test_reach_out_is_only_added_for_an_old_gripper_camera_setup_or_on_request(self):
         target = P.locate(self.a, "bottle cap")
         for hand, asked, extra in (({"used": True, "lean_aware": True}, None, 0.0),
@@ -475,10 +536,13 @@ class GrabFlowTests(unittest.TestCase):
         small = {"height": 2.0, "flat": False}
         self.assertIn("on top of the object", P.why_missed({"contact": True, "met_at_cm": 2.1}, small))
         self.assertIn("above the object", P.why_missed({"contact": True, "met_at_cm": 5.5}, small))
-        self.assertEqual([P.next_descent({"report": r, "close": 1.0}, small) for r in (
-            {"contact": True, "met_at_cm": 5.5}, {"contact": True, "met_at_cm": 2.1}, {"contact": False}, {})],
-            [{"stop": False, "close": None}, {"stop": True, "close": None}, {"stop": True, "close": 0.5},
-             {"stop": True, "close": None}])
+        plan = lambda r, reach=None: P.next_descent({"report": r, "close": 1.0, "reach": reach}, small)
+        self.assertEqual(plan({"contact": True, "met_at_cm": 5.5}, 0.0), {"stop": False, "close": None, "reach": None})
+        self.assertEqual(plan({"contact": False}, 0.0), {"stop": True, "close": 0.5, "reach": None})
+        self.assertEqual(plan({"contact": True, "met_at_cm": 2.1}, 0.0), {"stop": True, "close": None, "reach": 1.0})
+        self.assertEqual(plan({"contact": True, "met_at_cm": 2.1}, 1.0), {"stop": True, "close": None, "reach": 0.0})
+        self.assertEqual(plan({"contact": True, "met_at_cm": 0.2}, 1.0), {"stop": True, "close": None, "reach": None})   # beside it: same again
+        self.assertEqual(plan({"contact": True, "met_at_cm": 2.1}), {"stop": True, "close": None, "reach": None})        # reach given or measured
         self.assertIn("beside it", P.why_missed({"contact": True, "met_at_cm": 0.2}, small))
         self.assertIn("without touching anything", P.why_missed({"contact": False}, small))
         self.assertIn("lost it", P.why_missed({"contact": True, "met_at_cm": 0.2, "slipped": True}, small))
@@ -542,7 +606,7 @@ class SharpenTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
-    """--precise switches the careful way on; without it grab_text.py is the pickup it was."""
+    """On this branch the careful way is what grab_text.py does; --basic is the pickup as it was."""
 
     def run_main(self, *flags):
         with patch.object(G, "find_and_grab") as usual, patch.object(P, "find_and_grab") as careful, \
@@ -550,29 +614,31 @@ class CommandLineTests(unittest.TestCase):
             G.main(["--text", "bottle cap", *flags])
         return usual, careful, said.getvalue()
 
-    def test_default_is_the_usual_pickup(self):
-        usual, careful, said = self.run_main()
+    def test_basic_is_the_pickup_as_it_was(self):
+        usual, careful, said = self.run_main("--basic")
         careful.assert_not_called()
         args, text = usual.call_args.args
         self.assertEqual((text, args.precise, args.reach_out, args.no_hand), ("bottle cap", False, 1.0, True))
-        self.assertNotIn("Precise", said)
+        self.assertIn("careful aim is OFF", said)
 
-    def test_precise_uses_the_careful_way_and_adds_no_reach_out_unless_asked(self):
-        usual, careful, said = self.run_main("--precise")
-        usual.assert_not_called()
-        args, text = careful.call_args.args
-        self.assertEqual((text, args.reach_out, args.no_hand, args.tries, args.min_close), ("bottle cap", None, True, 2, 0.8))
-        self.assertIn("Precise aim ON", said)
+    def test_default_is_the_careful_way_with_no_fixed_reach_out_unless_asked(self):
+        for flags in ((), ("--precise",)):
+            usual, careful, said = self.run_main(*flags)
+            usual.assert_not_called()
+            args, text = careful.call_args.args
+            self.assertEqual((text, args.reach_out, args.no_hand, args.tries, args.min_close),
+                             ("bottle cap", None, True, 2, 0.8))
+            self.assertIn("Careful aim ON", said)
         for flags, reach in ((("--reach-out", "1.5"), 1.5), (("--reach-out=0",), 0.0)):
-            _, careful, _ = self.run_main("--precise", *flags)
+            _, careful, _ = self.run_main(*flags)
             self.assertEqual(careful.call_args.args[0].reach_out, reach)
-        _, careful, _ = self.run_main("--precise", "--hand", "--tries", "1", "--no-zoom", "--no-lens")
+        _, careful, _ = self.run_main("--hand", "--tries", "1", "--no-zoom", "--no-lens")
         args = careful.call_args.args[0]
         self.assertEqual((args.no_hand, args.tries, args.no_zoom, args.no_lens), (False, 1, True, True))
 
 
 class ServerTests(unittest.TestCase):
-    """dispense_server.py --precise picks the careful way; without it, as before (test_dispense_server.py)."""
+    """dispense_server.py picks the careful way; with --basic, as before (test_dispense_server.py)."""
 
     def setUp(self):
         quiet(self)

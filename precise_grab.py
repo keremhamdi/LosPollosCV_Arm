@@ -1,6 +1,6 @@
-"""The careful way to grab: `grab_text.py --precise` (and `dispense_server.py --precise`).
+"""The careful way to grab. On this branch it is what grab_text.py and dispense_server.py do;
+`--basic` gives the pickup as it was, and then nothing here runs.
 
-Off by default. Without --precise, grab_text.py picks exactly as before and nothing here runs.
 Nothing in controller/ is changed or needed: this only decides where to send the arm and what to
 do after a miss, through the arm page's existing requests.
 
@@ -13,8 +13,10 @@ What it does differently (docs/PRECISE_AIM.md has the why, and how to try it one
   - if the jaws close on nothing, says what the miss looked like (stopped in the air, on top of
     the object, too high or beside it), looks again and tries again: without the contact stop
     after a stop in the air, lower after closing above the table on nothing
-  - with --hand: the gripper camera's correction allows for how much the gripper leans
-    (needs "handcal" run once with --precise, which measures that lean)
+  - "aimcheck <object>" measures once how far off the aim really is (instead of a guessed
+    reach-out); until then a grab whose aim missed is retried with the other guess (0 or 1 cm)
+  - with --hand: the gripper camera only accepts a match near where the object must be, and its
+    correction allows for how much the gripper leans (after "handcal" is run once more)
 
 Not yet run on the real arm: checked on a simulated table only (test_aim.py).
 """
@@ -328,20 +330,26 @@ def clear_view(a, t, above):
 
 
 def next_descent(res, t):
-    """How to go down on the next try, from where the arm stopped on this one. Returns
-    {"stop": use the arm's contact stop on the way down, "close": closing height or None for the plan}.
+    """How to go about the next try, from where the arm stopped on this one. Returns
+    {"stop": use the arm's contact stop on the way down, "close": closing height or None for the plan,
+     "reach": guessed extra reach in cm, or None to keep it}.
       it stopped clearly in the air (nothing can have been there): the same height, without the
           contact stop, so it can't stop early again
       it closed at the planned height on nothing, having touched nothing: half as high
-      otherwise (it touched the object or the table): the same again, with the new aim"""
+      a fingertip came down on top of the object: the aim was off by a centimetre or more. With
+          nothing measured about the aim, try the other guess: 1 cm more reach, or none
+      otherwise (the jaws closed beside it): the same again, at the new aim"""
     rep = res.get("report") or {}
     met, closed = rep.get("met_at_cm"), res.get("close")
     top = t["height"] if t["height"] else (FLAT_LOOK_CM if t["flat"] else None)
     if rep.get("contact") and met is not None and top is not None and met > top + IN_THE_AIR_CM:
-        return {"stop": False, "close": None}
+        return {"stop": False, "close": None, "reach": None}
     if rep.get("contact") is False and closed is not None:
-        return {"stop": True, "close": max(FLOOR_CLOSE_CM, round(0.5 * closed, 1))}
-    return {"stop": True, "close": None}
+        return {"stop": True, "close": max(FLOOR_CLOSE_CM, round(0.5 * closed, 1)), "reach": None}
+    other = None
+    if res.get("reach") is not None and not rep.get("slipped") and landed_on_it(rep, t):
+        other = 0.0 if abs(res["reach"]) > 1e-6 else SHORT_GUESS_CM
+    return {"stop": True, "close": None, "reach": other}
 
 
 def grab_with_retries(a, t, find_again, tries=None):
@@ -353,6 +361,10 @@ def grab_with_retries(a, t, find_again, tries=None):
     for n in range(1, tries + 1):
         res = grab_target(a, t, descent)
         res["attempts"] = n
+        if res["holding"] and res["reach"] is not None and res["reach"] != _session["reach"]:
+            _session["reach"] = res["reach"]     # this guess got it: start with it from now on
+            print(f"  Got it with {res['reach']:g} cm extra reach, so the next grabs start with that. "
+                  'To measure it instead of guessing, type "aimcheck <object>" once.')
         if a.dry or res["holding"] or not res["ok"] or n == tries:
             break
         print(f"Didn't get it: {res['why']}. Looking again (try {n + 1} of {tries})...")
@@ -374,6 +386,64 @@ def find_and_grab(a, text, tries=None):
     if t is None:
         return None
     return grab_with_retries(a, t, lambda near: locate(a, text, near), tries)
+
+
+def find_hand(a, text, near, close_enough=None, tries=2):
+    """The object's middle in the gripper camera's picture: ((u, v), picture, outline) or (None, picture, None).
+
+    Like grab_text.find_in_hand, but a match only counts if it can be the object: close_enough(centre)
+    says whether a blob is near enough to where the object must show. (A real run took something
+    710 px from the expected spot for the object; the whole correction was then thrown away. Here
+    such a match is passed over and the object is looked for where it has to be.)"""
+    import time
+    if close_enough is None:
+        return G.find_in_hand(a, text, near=near, tries=tries)
+    ts.VLM_BACKEND = "none"
+    near = np.asarray(near, float)
+
+    def centre(c):
+        ys, xs = np.nonzero(np.asarray(c["mask"]))
+        return np.array([xs.mean(), ys.mean()])
+
+    def nearest(cands):
+        seen = [(float(np.linalg.norm(centre(c) - near)), c) for c in cands]
+        seen = [(d, c) for d, c in seen if close_enough(centre(c))]
+        return min(seen, key=lambda dc: dc[0])[1] if seen else None
+    img, passed_over = None, 0
+    for attempt in range(tries):
+        time.sleep(0.8)                               # let the camera catch up after moving
+        img = G.hand_frame(a)
+        old = ts.SAM_SCORE_MIN
+        ts.SAM_SCORE_MIN = 0.2 if attempt else old    # later tries: accept weaker matches
+        try:
+            res = ts.decide(img, text, None)
+        finally:
+            ts.SAM_SCORE_MIN = old
+        cands = [c for c in res["candidates"] if np.asarray(c["mask"]).sum() >= 60]   # not specks
+        if not cands:
+            continue
+        top = max(c["target_score"] for c in cands)
+        good = [c for c in cands if c["target_score"] >= 0.5 * top]
+        best = nearest(good) or nearest(cands)
+        if best is not None:
+            c = centre(best)
+            return (float(c[0]), float(c[1])), img, best
+        passed_over = len(cands)
+    if passed_over and "far_match" not in _told:
+        _told.add("far_match")
+        print(f"  gripper camera: saw '{text}' only far from where the object must be; not taking that for it")
+    if img is not None:
+        # From straight above things look different (a standing cylinder is just a disc), so the name
+        # may not match. Last try: any small object, the one nearest where it should be.
+        res = ts.decide(img, G.HAND_FALLBACK[0], G.HAND_FALLBACK[1])
+        n_px = img.width * img.height
+        small = [c for c in res["candidates"] if 30 < np.asarray(c["mask"]).sum() < 0.03 * n_px]
+        best = nearest(small)
+        if best is not None:
+            c = centre(best)
+            print(f"  gripper camera: '{text}' not recognised from above; using the small object where it should be")
+            return (float(c[0]), float(c[1])), img, best
+    return None, img, None
 
 
 class CantReach(RuntimeError):
@@ -534,7 +604,9 @@ def measure_lean(a, text, x, y, look, tilt, cal, centre):
             except CantReach:
                 break
             expect = _lean_geometry(cal, J, x, y, t, at)
-            p, img, best = G.find_in_hand(a, text, near=p_at + expect, tries=2)
+            limit = max(60.0, 2.0 * float(np.linalg.norm(expect)))     # the same object: about where geometry says
+            p, img, best = find_hand(a, text, p_at + expect,
+                                     lambda c, at=p_at + expect, limit=limit: np.linalg.norm(c - at) <= limit)
             if p is None:
                 break                                        # out of the picture: far enough
             step = np.array(p) - p_at
@@ -583,8 +655,8 @@ def hand_align(a, text, x, y, obj_h=None):
     info["lean_aware"] = cal_tilt is not None
     if cal_tilt is None and "handcal" not in _told:
         _told.add("handcal")
-        print("  gripper camera: this setup doesn't know how the gripper leans. Run handcal once with "
-              "--precise for a better aim away from where it was set up.")
+        print("  gripper camera: this setup doesn't know how the gripper leans. Run handcal once more "
+              "for a better aim away from where it was set up.")
     look = (obj_h if obj_h else 3.0) + cal.get("look_above", G.LOOK_ABOVE)   # same distance above its top as in setup
     x0, y0 = x, y
     try:   # open jaws: closed ones block the gripper camera's view
@@ -603,7 +675,9 @@ def hand_align(a, text, x, y, obj_h=None):
         if np.linalg.norm(shift) > 1 and "lean" not in _told:
             _told.add("lean")
             print(f"  gripper camera: leaning {tilt:g} deg here ({cal_tilt:g} in its setup), allowed for")
-        p, img, best = G.find_in_hand(a, text, near=target, tries=tries)
+        def close_enough(c):    # the fixed camera put the arm within a few cm: further off, it's something else
+            return np.hypot(*np.linalg.solve(J, target - c)) <= G.MAX_FIX_CM
+        p, img, best = find_hand(a, text, target, close_enough, tries)
         return p, img, best, target, J
 
     # 1. find it: look straight above the fixed camera's aim; if it isn't in view, look around it
@@ -656,6 +730,113 @@ def hand_align(a, text, x, y, obj_h=None):
 
 
 OLD_SETUP_REACH_OUT = 1.0   # cm further out, only with a gripper camera setup that doesn't know the lean
+SHORT_GUESS_CM = 1.0        # "the arm stops about this short": tried on the second grab if the first one's aim missed
+AIM_FILE = "controller/calib/aim.json"   # what "aimcheck" measured: how far off the fixed camera's aim really is
+AIM_BLEND_CM = 8.0          # a check counts fully near where it was made, less further away
+AIM_CHECK_ABOVE_CM = 1.5    # aimcheck holds the open jaws this far above the object's top
+_session = {"reach": 0.0}   # the reach guess that last got something, for the next grabs of this run
+
+
+def aim_checks():
+    import json
+    import os
+    if not os.path.exists(AIM_FILE):
+        return []
+    try:
+        return [c for c in json.load(open(AIM_FILE)).get("checks", [])
+                if all(np.isfinite(v) for v in (*c["at"], c["out"], c["left"]))]
+    except (ValueError, KeyError, TypeError, OSError):
+        return []
+
+
+def aim_offset(x, y):
+    """How far the arm has to go beyond the fixed camera's aim at x, y to really be over the object:
+    (cm further out from the base, cm to the left seen from the base), from the saved aim checks.
+    None if no check was ever saved."""
+    checks = aim_checks()
+    if not checks:
+        return None
+    w = np.array([1.0 / ((c["at"][0] - x) ** 2 + (c["at"][1] - y) ** 2 + AIM_BLEND_CM ** 2) for c in checks])
+    w /= w.sum()
+    return (float(sum(wk * c["out"] for wk, c in zip(w, checks))),
+            float(sum(wk * c["left"] for wk, c in zip(w, checks))))
+
+
+def aim_check(a, text):
+    """Measure, once, how far off the aim really is: the arm holds its open jaws just above the
+    object, you say which way they should move until they are centred over it, and that is saved
+    and added to every aim from then on (instead of a guessed reach-out). "aimcheck clear" forgets it."""
+    import json
+    import os
+    if text.strip().lower() == "clear":
+        if os.path.exists(AIM_FILE):
+            os.remove(AIM_FILE)
+        print("Aim checks forgotten.")
+        return
+    t = locate(a, text)
+    if t is None:
+        return
+    top = t["height"] if t["height"] else (FLAT_LOOK_CM if t["flat"] else 3.0)
+    hover, above = max(2.0, top + AIM_CHECK_ABOVE_CM), max(a.above, round(top + 5, 1))
+    F = G.arm_frame(t["x"], t["y"])                    # columns: away from the base, and to its left
+    had = aim_offset(t["x"], t["y"]) or (0.0, 0.0)
+    move = np.array(had, float)
+    print(f"Aim check on {t['what']} at x={t['x']:.1f}, y={t['y']:.1f} cm ({describe(t)}). The open jaws will stop "
+          f"{hover:.1f} cm above the table, over where it thinks the object is.")
+    input("Follower on (Self-controlled), Hold arm pressed. Enter to move (Ctrl+C to cancel)... ")
+    requests.post(a.arm_url + "/api/release", json={}, timeout=30)
+
+    def go_to(h):
+        x, y = np.array([t["x"], t["y"]]) + F @ move
+        goto(a, float(x), float(y), h)
+    go_to(above)
+    go_to(hover)
+    print("""Look straight down on the jaws. Are they centred over the object? Type where they should go, in cm:
+   out 1      further from the arm's base        in 0.5    back towards it
+   left 0.5   left, seen from the base           right 1   right, seen from the base
+   Enter      they are centred: save             q         cancel, save nothing""")
+    ways = {"out": (1, 0), "in": (-1, 0), "left": (0, 1), "right": (0, -1)}
+    while True:
+        line = input("aimcheck> ").strip().lower()
+        if line in ("q", "quit"):
+            go_to(above)
+            print("Cancelled, nothing saved.")
+            return
+        if not line:
+            break
+        try:
+            way, cm = line.split()
+            step = np.array(ways[way], float) * float(cm.replace(",", "."))
+        except (ValueError, KeyError):
+            print('Like "out 1", "left 0.5", or just Enter when centred.')
+            continue
+        if np.linalg.norm(step) > 3 or np.linalg.norm(move + step) > 5:
+            print("That is a lot (over 3 cm at once, or 5 cm in all): the calibration needs redoing rather than this.")
+            continue
+        move = move + step
+        try:
+            go_to(hover)
+        except RuntimeError as e:
+            move = move - step
+            print(f"  can't go there: {e}")
+            continue
+        print(f"  now {move[0]:+.1f} cm out, {move[1]:+.1f} cm left of the camera's aim")
+    checks = [c for c in aim_checks() if np.hypot(c["at"][0] - t["x"], c["at"][1] - t["y"]) > 5.0]   # replaces a check made here
+    checks.append({"at": [round(t["x"], 1), round(t["y"], 1)], "out": round(float(move[0]), 2), "left": round(float(move[1]), 2)})
+    os.makedirs(os.path.dirname(AIM_FILE), exist_ok=True)
+    with open(AIM_FILE, "w") as f:
+        json.dump({"checks": checks}, f, indent=1)
+    go_to(above)
+    print(f"Saved {AIM_FILE}: here the arm goes {move[0]:+.1f} cm out and {move[1]:+.1f} cm left of the camera's aim "
+          f"({len(checks)} check{'s' if len(checks) != 1 else ''} in all). One or two more at other distances from the base help.")
+
+
+def landed_on_it(rep, t):
+    """Did the descent stop on top of a small object (a fingertip came down on it)?"""
+    met = rep.get("met_at_cm")
+    low = t["height"] if t["height"] else (FLAT_LOOK_CM if t["flat"] else None)
+    return bool(rep.get("contact") and met is not None and low is not None and low < 4.0
+                and max(1.2, 0.5 * low) < met <= low + IN_THE_AIR_CM)
 
 
 def why_missed(rep, t, close=None):
@@ -667,7 +848,7 @@ def why_missed(rep, t, close=None):
         low = h if h else (FLAT_LOOK_CM if t["flat"] else None)
         if low is not None and met > low + IN_THE_AIR_CM:
             return f"it stopped {met:.1f} cm up, above the object, as if it touched something there"
-        if low is not None and low < 4.0 and met > max(1.2, 0.5 * low):
+        if landed_on_it(rep, t):
             return f"it stopped {met:.1f} cm up, on top of the object: a fingertip came down on it (aim a little off)"
         return "the jaws closed beside it (aim a little off)"
     if rep.get("contact") is False:
@@ -686,14 +867,15 @@ def grab_target(a, t, descent=None):
     `descent`: what next_descent gives after a miss, to go down differently.
     Returns {"ok": the arm did the grab, "holding": it has something, "why": what went wrong if not,
              "report": what the arm page measured, "error": the page's refusal if any,
-             "above": lift height, "close": the closing height asked for}."""
+             "above": lift height, "close": the closing height asked for, "reach": guessed extra reach or None}."""
     h = t["height"]
     close, above = grab_heights(a, h, t["flat"])
     descent = descent or {"stop": True, "close": None}
     if descent.get("close") is not None and a.close is None:
         close = descent["close"]
     look_h = h if h else (FLAT_LOOK_CM if t["flat"] else None)
-    out = {"ok": True, "holding": False, "why": "", "report": {}, "error": None, "above": above, "close": close}
+    out = {"ok": True, "holding": False, "why": "", "report": {}, "error": None, "above": above, "close": close,
+           "reach": None}    # "reach": the guessed extra reach used, when nothing better was known
     print(f"Found {t['what']} (score {t['score']:.2f}): {describe(t)}, standing at table x={t['x']:.1f}, y={t['y']:.1f} cm")
     stop = not a.side and not a.no_feel and descent.get("stop", True)
     print(f"Planned closing height: {close:g} cm above the calibrated table; approach {above:g} cm; "
@@ -711,17 +893,24 @@ def grab_target(a, t, descent=None):
                 gx, gy, hand = hand_align(a, t["hand_text"], gx, gy, look_h)
             except (RuntimeError, ValueError, KeyError, requests.RequestException, np.linalg.LinAlgError) as e:
                 print(f"  gripper camera skipped: {e}")
-        reach_out = a.reach_out
-        if reach_out is None:   # only an old gripper camera setup leaves the arm short (it doesn't know the lean)
-            reach_out = OLD_SETUP_REACH_OUT if hand["used"] and not hand["lean_aware"] else 0.0
-        if reach_out:
-            # Aim this far further out, straight away from the base (--reach-out, cm).
-            r = np.array([gx, gy - G.BASE_Y_CM])
-            n = np.linalg.norm(r)
-            if n > 1e-6:
-                r = r / n
-                gx, gy = gx + reach_out * r[0], gy + reach_out * r[1]
-                print(f"  aiming {reach_out:g} cm further out: x={gx:.1f}, y={gy:.1f}")
+        # How far beyond that aim to go (cm out from the base, cm to its left), in this order of trust:
+        # what you asked for; the gripper camera's own aim; what "aimcheck" measured; a guess that is
+        # switched between 0 and 1 cm when a grab's aim misses.
+        saved = aim_offset(gx, gy)
+        if a.reach_out is not None:
+            shift, why = (a.reach_out, 0.0), "--reach-out"
+        elif hand["used"]:
+            shift, why = (0.0 if hand["lean_aware"] else OLD_SETUP_REACH_OUT, 0.0), "gripper camera setup without lean"
+        elif saved is not None:
+            shift, why = saved, "aim check"
+        else:
+            guess = descent.get("reach")
+            out["reach"] = _session["reach"] if guess is None else guess
+            shift, why = (out["reach"], 0.0), "in case the arm stops short"
+        if abs(shift[0]) > 1e-6 or abs(shift[1]) > 1e-6:
+            gx, gy = np.array([gx, gy]) + G.arm_frame(gx, gy) @ np.array(shift, float)
+            print(f"  aiming {shift[0]:+.1f} cm out" + (f", {shift[1]:+.1f} cm left" if abs(shift[1]) > 1e-6 else "")
+                  + f" ({why}): x={gx:.1f}, y={gy:.1f}")
     body["x"], body["y"] = round(float(gx), 2), round(float(gy), 2)
     if h:
         body["object_height"] = round(h, 1)   # the arm starts feeling above it, and handles small and big differently

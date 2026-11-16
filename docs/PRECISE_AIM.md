@@ -1,69 +1,85 @@
-# `--precise`: a careful aim for small objects (off by default)
+# Branch `small-object-grab`: a careful aim for small objects
 
-`grab_text.py` without `--precise` is unchanged: the friend's pickup, standing camera
-only, planned closing height, 1 cm reach-out. Nothing in `controller/` is touched
-or needed. `--precise` only changes **where the arm is sent**, **how low it is asked
-to close for small things**, and **what happens after a miss**, through the arm
-page's existing requests. It never sends `feel_all_the_way`.
+On this branch `grab_text.py` and `dispense_server.py` pick the careful way by
+default. `--basic` gives the pickup exactly as it is on `feel-grab-reachy`.
+Nothing in `controller/` is changed: the arm's motion, contact stop and
+calibration files are the friend's. Only **where the arm is sent**, **how low it
+closes on small things** and **what happens after a miss** differ.
 
-**Not run on the real arm yet.** It was worked out from the code and checked on a
-simulated table (`test_aim.py`, `sim_scene.py`). Numbers below are from that
-simulation. Try it one step at a time, as listed under "Trying it".
+**Not run on the real arm yet.** It was worked out from the code and your run
+notes, and checked on a simulated table (`test_aim.py`, `sim_scene.py`).
 
-## What it changes, and why
+## On the robot laptop
 
-| In the default pickup | Effect | With `--precise` |
-| --- | --- | --- |
-| The aim is the lowest fifth of the outline: the object's near *edge*. | About 1 cm off for short things (caps, cubes), several cm for flat things (blister packs). On top of that comes the fixed 1 cm reach-out. | Aim at the middle of where the object stands; flat things at the middle of their outline (`aim.footprint`). No reach-out unless you pass `--reach-out`. |
-| The planned closing height is never under 1.5 cm. | A 2 cm object is held by its top half centimetre at best; a flat one is closed over. | Same plan (half the object's height, at most 6 cm, 1.5 cm if unknown), but small things may go lower, down to `--min-close` (default 0.8 cm), and flat things are closed on at that height. `--min-close 1.5` gives exactly the default plan. |
-| Pixel to table is a flat mapping on a wide-angle picture. | Drifts away from the calibration marks. | The picture is straightened first, from the same marks, and only if that clearly predicts left-out marks better. Otherwise the numbers are the arm page's own (`aim.TableMap`). |
-| A small object is a few dozen pixels and its outline is rough. | Position and height are read off a ragged edge. | A second SAM 3 pass on an enlarged cut-out around it (`sharpen`); dropped unless it clearly shows the same object. |
-| One attempt. A miss says only "nothing in the gripper". | Stopping errors and aiming errors look the same. | After a miss it says which it was, from where the arm stopped compared with the object's height: *stopped in the air above it*, *on top of it* (a fingertip landed on it), *beside it*, or *closed above the table without touching anything*. Then it opens, parks, looks again and grabs again (`--tries`, default 2). |
-| The contact stop ends the descent too high and the jaws close above the object. | Miss. | If the first try stopped clearly in the air (more than 1.5 cm above the object's top), the second try goes to the same planned height without the contact stop. If the first try closed at the planned height on nothing, the second goes half as high (never under 0.5 cm). A `--close` you give is never changed. |
-| `--hand`: "object under the jaws" was measured at one lean of the gripper, but the arm leans the gripper out the further it reaches. The camera leans with it; the fingertips still go straight down. | The arm stops short, about 2 cm per 10 degrees of extra lean. This is very likely what the 1 cm reach-out was compensating. | `handcal` (run with `--precise`) also measures where that spot shows at each lean, in 5 degree steps; the correction uses it. |
-| `dispense_server.py` closes at a fixed 5 cm, without the contact stop. | Anything under 5 cm is missed. | `dispense_server.py --precise` picks as above. |
+```bash
+git fetch origin
+```
 
-Simulation: a 3 cm bottle cap is aimed at within 0.02 to 0.13 cm (default aim: about
-1 cm off before the reach-out). With `--hand` and a gripper leaning up to 40 degrees,
-the corrected aim ends within 0.1 to 0.6 cm of the object (three different camera
-mounts tried), against 2.6 to 6.7 cm at leaning spots without the lean correction.
+```bash
+git switch small-object-grab
+```
 
-## Trying it, one change at a time
+Controller as before (it can keep running if it already reports `friend-baseline-v1`):
 
-Keep the controller and calibration exactly as they are.
+```bash
+cd controller && python3 -m arm.click --camera /dev/video4 --hand-camera /dev/video6
+```
 
-1. **Look, don't move.** `grab_text.py --precise --dry --text "small white cylinder"`.
+1. **Look, don't move.** From the repository root:
+
+   ```bash
+   .venv/bin/python -B grab_text.py --dry --text "small bottle"
+   ```
+
    Open `pick_views/latest.jpg`: the cross should sit at the middle of where the
-   object stands, not on its front edge. The printout says how it sized the object
-   up, the planned closing height, and whether a lens correction is in use.
-2. **Aim only.** `--precise --tries 1 --no-zoom --no-lens --min-close 1.5`. The only
-   differences from the default are the aim point and no reach-out. If it now lands
-   short by the same amount everywhere, add `--reach-out 1` and note that.
-3. **Lower closing for small things.** Drop `--min-close 1.5`. With the saved table
-   plane off by a centimetre, 0.8 cm can mean fingertips on the table: watch the
-   first descent and stop if it presses.
-4. **Add the rest.** `--precise` alone: second look, lens correction if the marks
-   support it, retry with the miss diagnosis.
-5. **Later, the gripper camera.** `--precise --hand`, after running `handcal` once
-   in `--precise` mode at a spot where the gripper points straight down. An old
-   `hand.json` still works and then gets the 1 cm reach-out as before.
+   object stands, not on its front edge. The printout gives its estimated size and
+   the planned closing height.
+2. **Grab, standing camera only.** Same command without `--dry`. Watch the first
+   descent: small things are closed on as low as 0.8 cm above the saved table
+   plane. If the fingers press the table, stop and use `--min-close 1.5`.
+3. **Measure the aim once** (one minute, replaces the guessed 1 cm reach-out).
+   Start `grab_text.py` without `--text`, then type `aimcheck small bottle`. The
+   open jaws stop just above the object; type `out 1`, `in 0.5`, `left 0.5`,
+   `right 0.5` until they are centred over it, then Enter. Repeat at one or two
+   other distances from the base. `aimcheck clear` forgets it.
+4. **Both cameras.** Add `--hand`. The existing `hand.json` works as it is.
+   Running `handcal` once more also measures how the gripper's lean moves the
+   picture, which matters far from the base.
 
-After a miss, the line `Didn't get it: ...` is the thing to write down: it separates
-stopping errors from aiming errors.
+If anything behaves worse than before, `--basic` is the previous pickup.
 
-## Options (all only with `--precise`)
+## What it does differently
 
-`--tries N` grabs per request. `--min-close CM` lowest planned closing height.
-`--reach-out CM` extra reach (negative pulls in). `--no-lens`, `--no-zoom` switch
-those two steps off. `--hand`, `--no-feel`, `--close CM`, `--dry` mean what they
-mean without `--precise`. `dispense_server.py`: `--precise`, `--hand`, `--tries`,
-`--min-close`, `--no-feel`, `--reach-out`; its `--close` is then only used if given.
+| Basic pickup | Effect | Careful pickup |
+| --- | --- | --- |
+| Aims at the lowest fifth of the outline: the object's near *edge*, then adds 1 cm of reach. | About 1 cm off for short things (caps, cubes), several cm for flat things (blister packs). | Aims at the middle of where the object stands; flat things at the middle of their outline (`aim.footprint`). |
+| Fixed 1 cm reach-out, a guess. | Right or wrong depending on where the object is. | Uses what `aimcheck` measured. Until then: no reach-out, and if a fingertip comes down on top of the object, the next try uses 1 cm (and keeps it for the session if that works). `--reach-out` overrides. |
+| Planned closing height never under 1.5 cm. | A 2 cm object is held by its top half centimetre at best; a flat one is closed over. | Same plan, but small things may go down to `--min-close` (0.8 cm) and flat things are closed on there. Never `feel_all_the_way`. |
+| Flat pixel-to-table mapping on a wide-angle picture. | Drifts away from the calibration marks. | The picture is straightened first, from the same marks, only if that clearly predicts left-out marks better. |
+| A small object is a few dozen pixels with a rough outline. | Position and height read off a ragged edge. | A second SAM 3 pass on an enlarged cut-out; dropped unless it clearly shows the same object. |
+| One attempt; a miss says only "nothing in the gripper". | Stopping and aiming errors look the same. | Says which it was (stopped in the air, on top of it, beside it, closed too high), then opens, parks, looks again and grabs again (`--tries`, default 2). |
+| The contact stop ends the descent in the air. | Jaws close above the object. | The second try goes to the same height without the contact stop. If it closed on nothing without touching anything, the second try goes half as high (not under 0.5 cm). |
+| `--hand`: takes whatever matches the name, even 710 px from where the object must be, then throws the whole correction away. | No wrist correction on that grab. | Only a match within 8 cm of where the object must be counts; otherwise it looks for a small object there. |
+| `--hand`: "object under the jaws" was measured at one lean of the gripper. | Arm stops short where the gripper leans, about 2 cm per 10 degrees. | After a new `handcal`, the correction allows for the lean. |
+| `dispense_server.py` closes at a fixed 5 cm. | Anything under 5 cm is missed. | Picks as above. |
+
+Simulation: a 3 cm bottle cap is aimed at within 0.02 to 0.13 cm (basic aim: about
+1 cm off before the reach-out). With `--hand` and a gripper leaning up to 40 degrees
+the corrected aim ends within 0.1 to 0.6 cm (three camera mounts tried), against
+2.6 to 6.7 cm at leaning spots without the lean correction.
+
+## Options
+
+`--basic` the previous pickup. `--tries N` grabs per request. `--min-close CM`
+lowest planned closing height. `--reach-out CM` fixed extra reach (negative pulls
+in). `--no-lens`, `--no-zoom` switch those steps off. `--hand`, `--no-feel`,
+`--close CM`, `--dry` as before. `dispense_server.py` takes `--basic`, `--hand`,
+`--tries`, `--min-close`, `--no-feel`, `--reach-out`, `--close`.
 
 ## Not solved
 
-- The arm's own contact stop is untouched. `--precise` only reacts to what it
-  reports; it cannot make the first descent stop at the right place, and all its
-  heights are in the saved table plane's coordinates.
+- The arm's own contact stop is untouched. The careful pickup only reacts to what
+  it reports, and every height is in the saved table plane's coordinates.
 - Long things lying down are aimed at their middle, but the wrist does not turn to
   them: lying along the jaws' closing direction and over 4.7 cm, they cannot be gripped.
 - One camera cannot tell everything: a thing lying and pointing straight at the fixed
@@ -77,6 +93,6 @@ mean without `--precise`. `dispense_server.py`: `--precise`, `--hand`, `--tries`
 ## Files
 
 `aim.py` (pixel to table, footprint; no arm or model needed), `precise_grab.py`
-(the careful grab; uses `grab_text.py` for detection, pictures and the gripper
-camera's detection), `sim_scene.py` + `test_aim.py` (simulated table, 37 tests).
-`grab_text.py` and `dispense_server.py` only gain the `--precise` switch.
+(the careful pickup; uses `grab_text.py` for detection and pictures),
+`sim_scene.py` + `test_aim.py` (simulated table). `grab_text.py` and
+`dispense_server.py` only gain the switch between the two pickups.

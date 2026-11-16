@@ -1,5 +1,9 @@
 # LosPollosCV_Arm
 
+**Branch `small-object-grab`:** `grab_text.py` and `dispense_server.py` use a careful aim for
+small objects by default; `--basic` is the pickup as on `feel-grab-reachy`. The controller is
+unchanged. Start with [docs/PRECISE_AIM.md](docs/PRECISE_AIM.md). Not yet run on the real arm.
+
 **Active branch: `feel-grab-reachy`.** The arm's motion/controller files have been
 restored to the friend's commit `a8ccb74` after the `feel-stop-v2` change failed
 on the physical arm. `grab_text.py` now uses standing-camera guidance by default;

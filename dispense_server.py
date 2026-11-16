@@ -25,9 +25,10 @@ GET  /v1/last       the last request and result (for Family/debug)
 Basic on purpose: one bowl position you give, no slots, place_verified is always false
 (not checked yet), "actions" and "slot_hint" are accepted and ignored.
 
-  .venv/bin/python dispense_server.py --precise      # off by default: pick the careful way
-        (precise_grab.py: aim at the middle of where the object stands, close at a height planned
-        from the object instead of a fixed 5 cm, look again and retry after a miss; docs/PRECISE_AIM.md)
+On this branch it picks the careful way (precise_grab.py: aim at the middle of where the object
+stands, close at a height planned from the object instead of a fixed 5 cm, look again and retry
+after a miss; docs/PRECISE_AIM.md). Add --hand to centre the jaws with the gripper camera.
+  .venv/bin/python dispense_server.py --basic        # the pick as it was: fixed 5 cm, one grab
 """
 import argparse
 import io
@@ -325,17 +326,18 @@ def main():
                     help="no arm, no camera: receive Reachy's requests, show them, answer 'not connected'")
     ap.add_argument("--bowl-height", type=float, default=8.0, help="let go this high above the table, cm")
     ap.add_argument("--close", type=float, default=None,
-                    help="close the jaws this high above the table, cm (default 5; with --precise: planned "
-                         "from the object's height)")
-    ap.add_argument("--precise", action="store_true",
-                    help="pick the careful way (precise_grab.py, docs/PRECISE_AIM.md). Off by default")
-    ap.add_argument("--hand", action="store_true", help="with --precise: centre the jaws with the gripper camera")
-    ap.add_argument("--tries", type=int, default=2, help="with --precise: grabs per request (default 2)")
-    ap.add_argument("--no-feel", action="store_true", help="with --precise: no contact stop on the way down")
+                    help="close the jaws this high above the table, cm (default: planned from the object's "
+                         "height; with --basic: 5)")
+    ap.add_argument("--basic", action="store_true",
+                    help="pick as before this branch: closing at --close (5 cm), one grab. The options below then do nothing")
+    ap.add_argument("--precise", action="store_true", help="(on by default on this branch; kept so old commands work)")
+    ap.add_argument("--hand", action="store_true", help="centre the jaws with the gripper camera")
+    ap.add_argument("--tries", type=int, default=2, help="grabs per request (default 2)")
+    ap.add_argument("--no-feel", action="store_true", help="no contact stop on the way down")
     ap.add_argument("--min-close", type=float, default=0.8, metavar="CM",
-                    help="with --precise: small and flat things may be closed on this low above the table (default 0.8)")
+                    help="small and flat things may be closed on this low above the table (default 0.8)")
     ap.add_argument("--reach-out", type=float, default=None, metavar="CM",
-                    help="with --precise: aim this many cm further from the base than measured")
+                    help="aim this many cm further from the base than measured (default: aim check, else the retry's guess)")
     ap.add_argument("--above", type=float, default=14.0, help="approach / carry height, cm")
     ap.add_argument("--arm-url", default="http://localhost:8890")
     ap.add_argument("--host", default="0.0.0.0", help="0.0.0.0 = reachable from Buddy's laptop")
@@ -344,7 +346,8 @@ def main():
     if ts is None and not a.listen_only:
         ap.error("camera/arm packages are missing: pip install -r requirements.txt (or use --listen-only)")
     a.meds = load_meds(a.meds)
-    a.precise_close = a.close                 # --precise plans the closing height from the object unless --close is given
+    a.precise = not a.basic
+    a.precise_close = a.close                 # the closing height is planned from the object unless --close is given
     if a.close is None:
         a.close = 5.0
     if a.precise and P is not None:
@@ -353,7 +356,9 @@ def main():
         print("Medicines:", ", ".join(f"{k} -> {v}" for k, v in a.meds.items()))
     where = f"bowl at {a.bowl[0]}, {a.bowl[1]}" if a.bowl else f"finds the '{a.bowl_text}' in the camera"
     if a.precise:
-        where += "; PRECISE picking" + (" with the gripper camera" if a.hand else "")
+        where += "; careful picking" + (" with the gripper camera" if a.hand else "")
+    else:
+        where += "; BASIC picking"
     if a.listen_only:
         where = "LISTEN ONLY: nothing is looked for or moved"
     print(f"Medicine Buddy arm server on http://{a.host}:{a.port}  /v1/dispense  /v1/move_object  ({where})")

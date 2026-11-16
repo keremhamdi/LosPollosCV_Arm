@@ -1,4 +1,5 @@
-"""The normal pickup must not silently invoke wrist guidance. No robot I/O."""
+"""The basic pickup (--basic on this branch) must not silently invoke wrist guidance. No robot I/O.
+The careful aim that is the default here is tested in test_aim.py."""
 from contextlib import redirect_stdout, redirect_stderr
 import io
 import unittest
@@ -11,7 +12,7 @@ import grab_text as grab
 class CameraModeTests(unittest.TestCase):
     def arguments(self, *flags):
         with patch.object(grab, 'find_and_grab') as run, redirect_stdout(io.StringIO()):
-            grab.main(['--text', 'small white cylinder', *flags])
+            grab.main(['--basic', '--text', 'small white cylinder', *flags])
         args, text = run.call_args.args
         args.last_text = text
         return args
