@@ -1,6 +1,6 @@
 # Current pickup: automatic small-object profiles and both cameras
 
-Branch: `feel-grab-reachy`. Pickup build: **`pose-height-v2`**.
+Branch: `feel-grab-reachy`. Pickup build: **`fine-centering-v3`**.
 Running controller build: **`descent-taper-v1`**.
 Both standing and wrist guidance are enabled by default in `grab_text.py`.
 Use `--no-hand` only for an explicit standing-only comparison.
@@ -48,11 +48,24 @@ Use `--no-hand` only for an explicit standing-only comparison.
 - For these profiles, wrist corrections are limited to 0.5 cm per move and 2 cm
   total suggested displacement from the standing aim; hover searches stay within
   1 cm. Other objects retain the 2 cm step / 8 cm displacement limits.
-  There are at most five alignment looks and
-  another observation after every correction. Lost or unconfirmed targets revert
+  Bottle and accepted-upright cylinder use at most five alignment looks, with
+  another observation after every correction. The cap and sideways/uncertain
+  cylinder use at most eight looks and a tighter estimated 0.15 cm offset limit
+  instead of 0.3 cm. They require two observations within that limit, differing
+  by at most an estimated 0.1 cm. The confirmation observation does not command
+  another movement. Repeated camera frame IDs cannot count as fresh confirmation;
+  these are host-received frame IDs, not synchronized exposure timestamps.
+  Lost or unconfirmed targets revert
   to the standing aim. Confirmed wrist alignment skips the inherited extra 1 cm
   outward offset. These profiles also skip that offset on standing-only/fallback
   aiming; other objects retain it. `--reach-out` is an optional explicit override.
+- Wrist diagnostics record the standing aim, saved jaw target pixel, each
+  observed object centre, estimated offset, frame IDs and outcome (aligned,
+  lost target, excessive correction, unconfirmed, etc.). They are included in
+  the controller request/report and `pick_views/wrist_alignment.json`. An
+  accepted wrist aim is still a hover alignment. This change does not establish
+  continuous tracking during descent, correct a wrongly calibrated jaw target,
+  or prove that a partial/incorrect SAM mask represents the physical grasp centre.
 - Each controller grab writes a JSON report under `config/local/grasp_runs`,
   including failures during motion. Reports contain the build, request, nominal
   heights, compensated motor-target heights, measured encoder/FK heights and
@@ -72,7 +85,7 @@ and 2.0 cm produced motor-target heights of 1.529, 2.696 and 1.990 cm. These are
 software checks, **not measured physical accuracy**. Real load, calibration and
 motor response still need a physical test.
 
-The offline suite passes **151 tests**, covering descent reference continuity,
+The offline suite passes **159 tests**, covering descent reference continuity,
 endpoint compensation, speed bounds, contact backoff, partial-path labelling,
 default camera mode, distant wrist detections, local crop coordinates, stale
 frames, target loss, correction limits, close/lift without contact, and report
@@ -84,6 +97,11 @@ happens before height selection, rejected geometry cannot raise the grip, and
 the cap range midpoint is not presented as a measured object height. SAM outputs and hardware
 feedback are mocked; no local robot or GPU inference was used. Synthetic shape
 fits do not establish physical calibration accuracy or real-image detection recall.
+Fine-centering regressions cover an offset the old threshold accepted, two-image
+confirmation without extra motion, jitter, repeated frames, target loss and
+the final observation limit. A client-to-controller test verifies the corrected
+cap XY, retained 0.5 cm height and saved alignment evidence. Bottle and accepted
+upright-cylinder tests retain their previous centering behaviour.
 
 ## Linux update and start
 
@@ -116,14 +134,16 @@ cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
 
 Type `small white cylinder` at `What now?`, whether it is upright or sideways.
 On another attempt type `small black cap`. No `--close` or `--object-height`
-is needed. Startup should print `Pickup build: pose-height-v2` and
+is needed. Startup should print `Pickup build: fine-centering-v3` and
 `standing camera + wrist alignment ON`; each request should print
 `Controller build: descent-taper-v1`, `Automatic profile: ...; closing at ... cm`
 and `Height decision: ...` explaining the chosen height or fallback.
 A confirmed wrist correction prints
 `wrist alignment confirmed; no extra outward offset`. If wrist detection is
 unavailable or uncertain, the terminal explicitly reports standing-camera fallback.
-Pulling does not update running Python processes; restart both programs.
+Pulling does not update running Python processes.
+This update changes the pickup client and diagnostics only. If the controller
+already reports `descent-taper-v1`, restarting the pickup client is sufficient.
 
 ## First physical test and remaining calibration limit
 
@@ -202,6 +222,7 @@ cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
 ```
 
 This performs read-only collection and creates a ZIP in Downloads, including
-the original standing frame, selected segmentation mask, wrist images and
+the original standing frame, selected segmentation mask, wrist images,
+`wrist_alignment.json` and
 recent controller reports. Transfer it
 to your computer and attach it in the chat. It does not upload automatically.

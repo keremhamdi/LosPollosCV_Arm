@@ -328,7 +328,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((body['x'],body['y']),(3.,25.))
                 self.assertTrue(body['guard'])
                 self.assertNotIn('feel_all_the_way',body)
-                self.assertEqual(body['pickup_build'],'pose-height-v2')
+                self.assertEqual(body['pickup_build'],'fine-centering-v3')
                 self.assertEqual(self.reacher.grab.await_args.args[2],expected)
                 self.assertEqual(body['height_decision']['closing_height_cm'],expected)
                 if text == 'small black cap':
@@ -339,6 +339,46 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(body['height_source'],'cylinder_pose_and_known_dimensions')
                 wrist.assert_called_once()
                 self.assertEqual(wrist.call_args.args[-1],.75 if text == 'small black cap' else 2*expected)
+
+    async def test_cap_fine_alignment_reaches_controller_and_saves_evidence(self):
+        import grab_text
+        from unittest.mock import mock_open
+        with patch.object(grab_text,'find_and_grab') as pick, redirect_stdout(io.StringIO()):
+            grab_text.main(['--text','small black cap'])
+        args,text = pick.call_args.args
+        args.last_text=text
+        calibration={'target_px':[620.,425.], 'px_per_cm':[[17.25,0.],[0.,17.25]],
+                     'at':[0.,25.], 'look_above':13.}
+        img=Image.new('RGB',(1280,720))
+        self.app.camera.locate=Mock(return_value=(0.,25.))
+        submitted=[]
+        def post(url,json,timeout):
+            import json as wire
+            name=url.rsplit('/',1)[1]
+            body=wire.loads(wire.dumps(json,allow_nan=False))
+            submitted.append((name,body))
+            result={} if name=='release' else asyncio.run(self.app.api(name,body))
+            return Mock(json=lambda:{'ok':True,**result})
+        with patch.object(grab_text.requests,'post',side_effect=post), \
+                patch.object(grab_text.requests,'get',return_value=Mock(json=lambda:{'log':'test'})), \
+                patch('os.path.exists',return_value=True), \
+                patch('builtins.open',mock_open(read_data=json.dumps(calibration))), \
+                patch.object(grab_text,'goto') as move, patch.object(grab_text,'save_hand_view'), \
+                patch.object(grab_text,'save_wrist_report') as saved, \
+                patch.object(grab_text,'find_in_hand',side_effect=[
+                    ((615.6875,425.),img,None), ((620.,425.),img,None), ((620.,425.),img,None)]), \
+                redirect_stdout(io.StringIO()):
+            close,above,est=grab_text.grab_heights(args,None,img.size)
+            await asyncio.to_thread(grab_text.go,args,img,500,500,text,.8,close,above,est)
+        body=submitted[-1][1]
+        self.assertEqual((body['x'],body['y'],body['height']),(.25,25.,.5))
+        self.assertEqual(self.reacher.grab.await_args.args[:3],(.25,25.,.5))
+        self.assertEqual(body['wrist_alignment_report']['status'],'aligned')
+        self.assertEqual(len(body['wrist_alignment_report']['observations']),3)
+        self.assertEqual(move.call_count,2)
+        saved.assert_called_once()
+        self.assertEqual(self.report_writer.call_args.args[0]['request']['wrist_alignment_report'],
+                         body['wrist_alignment_report'])
 
     async def test_numeric_guarded_grab_closes_and_lifts_without_seeking_table(self):
         reach = self.reach_module.Reacher.__new__(self.reach_module.Reacher)
@@ -414,6 +454,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
                         patch('builtins.open', mock_open(read_data=json.dumps(calibration))), \
                         patch.object(grab_text, 'find_in_hand', side_effect=[(p, img, None) for p in points]) as wrist, \
                         patch.object(grab_text, 'save_hand_view'), \
+                        patch.object(grab_text, 'save_wrist_report'), \
                         patch.object(grab_text, 'goto') as move, redirect_stdout(output):
                     close, above, est = grab_text.grab_heights(args, None, img.size)
                     await asyncio.to_thread(grab_text.go, args, img, 853, 537, 'small bottle',
@@ -428,6 +469,8 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(wrist.call_count, len(points))
                 self.assertEqual(move.call_count, len(points))
                 self.assertEqual('not trusting it' in output.getvalue(), rejected)
+                self.assertEqual(body['wrist_alignment_report']['status'],
+                                 'correction_too_large' if rejected else 'aligned')
                 reach.descend_guarded.assert_awaited_once_with(*expected_xy, 2., report={})
                 reach.arm.close_gripper.assert_awaited_once()
                 reach.lift.assert_awaited_once()

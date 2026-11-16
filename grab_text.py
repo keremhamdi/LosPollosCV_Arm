@@ -29,7 +29,7 @@ from PIL import Image
 import target_selector_v5 as ts
 import small_object_grasp as small_grasp
 
-PICKUP_BUILD = 'pose-height-v2'
+PICKUP_BUILD = 'fine-centering-v3'
 
 
 def base_pixel(mask):
@@ -553,6 +553,20 @@ LOOK_ABOVE = 13.0        # cm above the object's TOP where the arm stops to look
 MAX_FIX_CM = 8.0         # never shift more than this on the gripper camera's word
 
 
+class RepeatedHandFrame(RuntimeError):
+    """The controller has not delivered another wrist image yet."""
+
+
+def fine_wrist_alignment(a, text):
+    """Keep bottle/accepted-upright behaviour; refine flat or uncertain small targets."""
+    profile = small_grasp.profile_for(text)
+    if not profile:
+        return False
+    decision = getattr(a, 'height_decision', None) or {}
+    upright = decision.get('orientation_accepted') and decision.get('orientation') == 'upright'
+    return profile['name'] == 'black cap' or not upright
+
+
 def hand_frame(a):
     """The gripper camera's current picture (from the arm page)."""
     import base64
@@ -560,8 +574,17 @@ def hand_frame(a):
     f = (obs.get("frames") or {}).get("hand") or {}
     if not f.get("jpeg_base64"):
         raise RuntimeError("no gripper camera picture: start the controller with --hand-camera /dev/video6")
-    if f.get('receive_age_s', float('inf')) > 1.0:
+    age = f.get('receive_age_s', float('inf'))
+    if not np.isfinite(age) or not 0 <= age <= 1.0:
         raise RuntimeError('gripper camera image is stale; keeping standing-camera aim')
+    stamp = (f.get('camera_id'), f.get('sequence'))
+    if getattr(a, 'require_new_hand_frame', False):
+        if stamp[0] is None or not isinstance(stamp[1], int):
+            raise RuntimeError('wrist frame identity missing; cannot confirm fine alignment')
+        if stamp == getattr(a, '_last_hand_frame_id', None):
+            raise RepeatedHandFrame('waiting for a new wrist image; repeated frame cannot confirm alignment')
+    a._last_hand_frame_id = stamp
+    a.hand_frame_meta = {k:f.get(k) for k in ('camera_id','sequence','received_monotonic_s','receive_age_s')}
     return Image.open(io.BytesIO(base64.b64decode(f["jpeg_base64"]))).convert("RGB")
 
 
@@ -574,7 +597,10 @@ def find_in_hand(a, text, near=None, tries=3):
     img = None
     for attempt in range(tries):
         time.sleep(0.8)                               # let the camera catch up after moving
-        img = hand_frame(a)
+        try:
+            img = hand_frame(a)
+        except RepeatedHandFrame:
+            continue
         old = ts.SAM_SCORE_MIN
         ts.SAM_SCORE_MIN = 0.2 if attempt else old    # 2nd/3rd try: accept weaker matches
         try:
@@ -688,27 +714,59 @@ def hand_calibrate(a, text):
 def hand_correct(a, text, x, y, obj_h=None):
     """Hover above (x, y), look with the gripper camera, shift until the object is where the jaws close.
     Returns the corrected (x, y), or the same if the gripper camera can't help."""
+    from datetime import datetime, timezone
+    fine = fine_wrist_alignment(a, text)
+    a.wrist_alignment_used = False
+    a.wrist_report = {'started_at':datetime.now(timezone.utc).isoformat(),
+                      'pickup_build':PICKUP_BUILD, 'text':text, 'fine_alignment':bool(fine),
+                      'standing_xy_cm':[float(x),float(y)], 'status':'running',
+                      'tolerance_cm':.15 if fine else .3,
+                      'required_consistent_observations':2 if fine else 1,
+                      'search':[], 'observations':[],
+                      'measurement_basis':'saved 2D wrist calibration; not measured physical accuracy'}
+    a.require_new_hand_frame = fine
+    a._last_hand_frame_id = None
+    try:
+        return _hand_correct(a, text, x, y, obj_h, fine)
+    except (RuntimeError, ValueError, requests.RequestException, np.linalg.LinAlgError) as exc:
+        a.wrist_report.update(status='error', error=str(exc), final_xy_cm=[float(x),float(y)])
+        raise
+    finally:
+        a.require_new_hand_frame = False
+
+
+def _hand_correct(a, text, x, y, obj_h, fine):
     import json
     import os
-    a.wrist_alignment_used = False
     profile = small_grasp.profile_for(text)
     max_fix = 2. if profile else MAX_FIX_CM
     max_step = .5 if profile else 2.
+    report = a.wrist_report
+    def finish(status, fx, fy):
+        report.update(status=status, final_xy_cm=[float(fx),float(fy)],
+                      alignment_used=a.wrist_alignment_used)
+        return fx, fy
     if a.no_hand:
-        return x, y
+        return finish('disabled', x, y)
     if not os.path.exists(HAND_FILE):
         print('  gripper camera: hand calibration missing; using standing-camera aim')
-        return x, y
+        return finish('calibration_missing', x, y)
     cal = json.load(open(HAND_FILE))
     target, J = np.array(cal["target_px"]), np.array(cal["px_per_cm"])
+    if target.shape != (2,) or J.shape != (2,2) or not np.isfinite(target).all() or not np.isfinite(J).all():
+        raise ValueError('invalid wrist calibration values')
     c0, c1 = np.linalg.norm(J[:, 0]), np.linalg.norm(J[:, 1])
-    if abs(float(J[:, 0] @ J[:, 1])) / max(1e-9, c0 * c1) > 0.85:
+    if min(c0,c1) < 1e-6 or abs(float(J[:, 0] @ J[:, 1])) / max(1e-9, c0 * c1) > 0.85:
         print("  gripper camera: its saved setup is broken (the two test moves point the same way). Run handcal again.")
-        return x, y
+        return finish('calibration_invalid', x, y)
     if "at" in cal:   # setup was done with the arm pointing one way; turn the table directions to match now
         J = J @ arm_frame(*cal["at"]) @ arm_frame(x, y).T
     look = (obj_h if obj_h else 3.0) + cal.get("look_above", LOOK_ABOVE)   # same distance above its top as in setup
     x0, y0 = x, y
+    report.update(target_px=target.tolist(), px_per_cm=J.tolist(), look_height_cm=float(look),
+                  max_correction_cm=max_fix, max_step_cm=max_step)
+    if fine:
+        print('  fine centring: estimated offset under 0.15 cm, confirmed in two fresh images')
     try:   # open jaws: closed ones block the gripper camera's view
         requests.post(a.arm_url + "/api/release", json={}, timeout=30)
     except requests.RequestException:
@@ -720,6 +778,7 @@ def hand_correct(a, text, x, y, obj_h=None):
         lx, ly = x + dx, y + dy
         goto(a, lx, ly, look)
         p, img, best = find_in_hand(a, text, near=target, tries=2 if k == 0 else 1)
+        report['search'].append({'xy_cm':[float(lx),float(ly)], 'found':p is not None})
         if p is not None:
             found = (lx, ly, p, img, best)
             break
@@ -729,39 +788,69 @@ def hand_correct(a, text, x, y, obj_h=None):
         save_hand_view(img, None, None, target, 0)
         print("  gripper camera: couldn't find it, keeping the fixed camera's aim "
               "(last picture: pick_views/hand_latest_0.jpg)")
-        return x0, y0
+        return finish('target_not_found', x0, y0)
     # 2. Small corrections, with a new matching observation after every move.
     x, y, p, img, best = found
     track_near = target
-    for step in range(5):
+    max_looks = 8 if fine else 5
+    tolerance = report['tolerance_cm']
+    confirm_p = None
+    move_needed = True
+    for step in range(max_looks):
         if step:
-            goto(a, x, y, look)
+            if move_needed:
+                goto(a, x, y, look)
             p, img, best = find_in_hand(a, text, near=track_near, tries=2)
             if p is None:
                 print("  gripper camera: lost the requested object; using the standing-camera aim")
-                return x0, y0
+                return finish('target_lost', x0, y0)
         d = np.linalg.solve(J, target - np.array(p))       # how far to move (cm) to bring it under the jaws
-        print(f"  gripper camera: off by {np.hypot(*d):.1f} cm ({np.hypot(*(target - np.array(p))):.0f} px)")
+        print(f"  gripper camera: off by {np.hypot(*d):.2f} cm ({np.hypot(*(target - np.array(p))):.0f} px)")
         save_hand_view(img, best, p, target, step)
+        report['observations'].append({'step':step, 'xy_cm':[float(x),float(y)],
+            'object_px':[float(v) for v in p], 'delta_cm':d.tolist(),
+            'offset_cm':float(np.hypot(*d)), 'score':float(best['target_score']) if best else None,
+            'frame':getattr(a,'hand_frame_meta',None), 'image':f'pick_views/hand_latest_{step}.jpg'})
         if step and np.hypot(*d) > last + 0.3:
             print("  gripper camera: getting worse, not trusting it, keeping the fixed camera's aim")
-            return x0, y0
+            return finish('correction_worsened', x0, y0)
         last = np.hypot(*d)
         nx, ny = x + d[0], y + d[1]
         if np.hypot(nx - x0, ny - y0) > max_fix:
             print(f"  gripper camera wants more than {max_fix} cm from the fixed camera's aim: not trusting it")
-            return x0, y0
-        if np.hypot(*d) < 0.3:
-            a.wrist_alignment_used = True
-            break
-        if step == 4:
-            print('  gripper camera: alignment not confirmed after five looks; using standing-camera aim')
-            return x0, y0
+            return finish('correction_too_large', x0, y0)
+        if np.hypot(*d) < tolerance:
+            stable = confirm_p is not None and np.linalg.norm(np.linalg.solve(J, np.asarray(p)-confirm_p)) <= .1
+            if not fine or stable:
+                a.wrist_alignment_used = True
+                print(f"  gripper camera: aim moved by {np.hypot(x - x0, y - y0):.1f} cm in total")
+                return finish('aligned', x, y)
+            # A fresh image at the SAME pose must agree before accepting a small
+            # target. Repeating goto here would move/settle the arm unnecessarily.
+            confirm_p = np.asarray(p)
+            track_near = confirm_p
+            move_needed = False
+            report['observations'][-1]['decision'] = 'confirm_without_moving'
+            continue
+        confirm_p = None
+        if step == max_looks - 1:
+            break  # never issue another correction without a subsequent observation
         d *= min(1., max_step / max(1e-9, np.hypot(*d)))
         track_near = np.asarray(p) + J @ d
         x, y = x + d[0], y + d[1]
-    print(f"  gripper camera: aim moved by {np.hypot(x - x0, y - y0):.1f} cm in total")
-    return x, y
+        move_needed = True
+    print(f'  gripper camera: alignment not confirmed after {max_looks} looks; using standing-camera aim')
+    return finish('alignment_unconfirmed', x0, y0)
+
+
+def save_wrist_report(report):
+    import json
+    from pathlib import Path
+    try:
+        Path('pick_views').mkdir(exist_ok=True)
+        Path('pick_views/wrist_alignment.json').write_text(json.dumps(report, indent=2, allow_nan=False)+'\n')
+    except OSError as exc:
+        print(f'  wrist report could not be saved locally: {exc}')
 
 
 def arm_frame(x, y):
@@ -836,11 +925,15 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None, aim=None):
         if profile:
             body['standing_xy_cm'] = [gx,gy]
         a.wrist_alignment_used = False
+        a.wrist_report = None
         if not a.no_hand:
             try:
                 gx, gy = hand_correct(a, a.last_text, gx, gy, h)
             except (RuntimeError, ValueError, requests.RequestException, np.linalg.LinAlgError) as e:
                 print(f"  gripper camera skipped: {e}")
+        if a.wrist_report:
+            body['wrist_alignment_report'] = a.wrist_report
+            save_wrist_report(a.wrist_report)
         reach_out = a.reach_out if a.reach_out is not None else (0. if profile else 1.)
         if reach_out and not a.wrist_alignment_used:
             # The arm tends to stop a little short, towards its base. Aim this far further out,

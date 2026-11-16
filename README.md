@@ -1,10 +1,14 @@
 # LosPollosCV_Arm
 
-**Active branch: `feel-grab-reachy`. Pickup build: `pose-height-v2`.
+**Active branch: `feel-grab-reachy`. Pickup build: `fine-centering-v3`.
 Controller build: `descent-taper-v1`.**
 The friend's pickup flow now tapers hover compensation to zero during descent,
 keeps the planned closing height, and uses standing + wrist guidance by default.
 Wrist matching excludes distant detections and verifies each small correction.
+The cap and sideways/uncertain cylinder require an estimated XY offset below
+1.5 mm in two consistent, fresh wrist images. Bottle and accepted-upright
+cylinder alignment retain the previous check. These are image-based thresholds,
+not measured physical accuracy; the wrist calibration still needs to be correct.
 Type `small white cylinder` for the measured 2 × 1 cm cylinder, standing or lying
 sideways, or `small black cap` for the reported 5–10 mm cap. These names select
 profiles; no per-run height or orientation flag is needed. An accepted upright

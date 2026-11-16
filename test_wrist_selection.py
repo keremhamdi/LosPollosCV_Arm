@@ -64,8 +64,8 @@ class WristSelectionTests(unittest.TestCase):
         self.assertEqual(best['mask'].shape, (720,1280))
         self.assertEqual(detect.call_args_list[1].args[0].size, (640,615))
 
-    def align(self, points, text='small bottle'):
-        args = types.SimpleNamespace(no_hand=False, arm_url='http://offline-test')
+    def align(self, points, text='small bottle', decision=None):
+        args = types.SimpleNamespace(no_hand=False, arm_url='http://offline-test',height_decision=decision)
         cal = {'target_px': [620.,425.], 'px_per_cm': [[17.25,0.],[0.,17.25]],
                'at': [0.,25.], 'look_above': 13.}
         img = Image.new('RGB',(1280,720))
@@ -98,7 +98,8 @@ class WristSelectionTests(unittest.TestCase):
 
     def test_profile_corrections_are_half_centimetre_steps(self):
         xy,args,move = self.align([(594.125,425.),(602.75,425.),(611.375,425.),(620.,425.)],
-                                 text='small white cylinder')
+                                 text='small white cylinder',
+                                 decision={'orientation_accepted':True,'orientation':'upright'})
         self.assertEqual(xy,(1.5,25.))
         self.assertTrue(args.wrist_alignment_used)
         self.assertEqual([c.args[1] for c in move.call_args_list],[0.,.5,1.,1.5])
@@ -108,6 +109,64 @@ class WristSelectionTests(unittest.TestCase):
         self.assertEqual(xy,(0.,25.))
         self.assertFalse(args.wrist_alignment_used)
         self.assertEqual(move.call_count,1)
+
+    def test_fine_cap_corrects_offset_old_threshold_accepted(self):
+        # 0.25 cm: the old 0.3 cm acceptance would have closed at the initial aim.
+        xy,args,move = self.align([(615.6875,425.),(620.,425.),(620.,425.)],text='small black cap')
+        self.assertEqual(xy,(.25,25.))
+        self.assertTrue(args.wrist_alignment_used)
+        self.assertEqual(move.call_count,2)  # confirmation does not move again
+        self.assertEqual(args.wrist_report['status'],'aligned')
+        self.assertEqual(len(args.wrist_report['observations']),3)
+        self.assertEqual(args.wrist_report['tolerance_cm'],.15)
+
+    def test_sideways_cylinder_requires_consistent_second_image(self):
+        xy,args,move = self.align([(620.,425.),(620.,425.)],text='small white cylinder',
+                                 decision={'orientation_accepted':True,'orientation':'sideways'})
+        self.assertTrue(args.wrist_alignment_used)
+        self.assertEqual(move.call_count,1)
+        self.assertEqual(len(args.wrist_report['observations']),2)
+
+    def test_single_good_frame_followed_by_lost_cap_is_not_confirmed(self):
+        xy,args,move = self.align([(620.,425.),None],text='small black cap')
+        self.assertFalse(args.wrist_alignment_used)
+        self.assertEqual(move.call_count,1)
+        self.assertEqual(args.wrist_report['status'],'target_lost')
+
+    def test_jitter_inside_tolerance_still_needs_consistent_frames(self):
+        # Both are within 0.15 cm, but they disagree by 0.24 cm.
+        xy,args,move = self.align([(617.93,425.),(622.07,425.)]*4,text='small black cap')
+        self.assertFalse(args.wrist_alignment_used)
+        self.assertEqual(move.call_count,1)
+        self.assertEqual(args.wrist_report['status'],'alignment_unconfirmed')
+
+    def test_upright_cylinder_and_bottle_keep_existing_acceptance(self):
+        for text in ('small white cylinder','small bottle'):
+            xy,args,move = self.align([(615.6875,425.)],text=text,
+                                     decision={'orientation_accepted':True,'orientation':'upright'})
+            self.assertEqual(xy,(0.,25.))
+            self.assertTrue(args.wrist_alignment_used)
+            self.assertFalse(args.wrist_report['fine_alignment'])
+            self.assertEqual(move.call_count,1)
+
+    def test_repeated_frame_cannot_be_used_as_fresh_confirmation(self):
+        import base64
+        data=io.BytesIO(); Image.new('RGB',(40,30)).save(data,format='JPEG')
+        frame={'camera_id':'hand','sequence':5,'receive_age_s':.1,
+               'jpeg_base64':base64.b64encode(data.getvalue()).decode()}
+        args=types.SimpleNamespace(arm_url='http://offline-test',require_new_hand_frame=True)
+        with patch.object(grab.requests,'get',return_value=Mock(json=lambda:{'frames':{'hand':frame}})):
+            grab.hand_frame(args)
+            with self.assertRaises(grab.RepeatedHandFrame):
+                grab.hand_frame(args)
+            frame['sequence']=6
+            self.assertEqual(grab.hand_frame(args).size,(40,30))
+
+    def test_fine_last_look_does_not_issue_an_unobserved_correction(self):
+        xy,args,move = self.align([(616.55,425.)]*8,text='small black cap')
+        self.assertFalse(args.wrist_alignment_used)
+        self.assertEqual(move.call_count,8)
+        self.assertEqual(args.wrist_report['status'],'alignment_unconfirmed')
 
 
 if __name__ == '__main__':
