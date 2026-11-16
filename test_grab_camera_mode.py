@@ -21,7 +21,7 @@ class CameraModeTests(unittest.TestCase):
         self.assertFalse(args.no_hand)
         self.assertIsNone(args.close)
         self.assertFalse(args.no_feel)
-        self.assertEqual(args.reach_out, 1.)  # existing friend's compensation
+        self.assertIsNone(args.reach_out)  # automatic: zero for the two small-object profiles
 
     def test_wrist_guidance_can_be_explicitly_disabled(self):
         self.assertFalse(self.arguments('--hand').no_hand)
@@ -43,6 +43,7 @@ class CameraModeTests(unittest.TestCase):
 
     def test_normal_pick_never_calls_wrist_and_honours_planned_height(self):
         args = self.arguments('--no-hand')
+        args.last_text = 'test object'
         with patch.object(grab, 'hand_correct', side_effect=AssertionError('Wrist guidance forbidden')), \
                 patch.object(grab, 'find_in_hand', side_effect=AssertionError('Wrist SAM forbidden')), \
                 patch.object(grab, 'goto', side_effect=AssertionError('Wrist search movement forbidden')):
@@ -66,6 +67,7 @@ class CameraModeTests(unittest.TestCase):
 
     def test_planned_height_still_adapts_to_estimate_and_marks_unknown_fallback(self):
         args = self.arguments()
+        args.last_text = 'test object'
         for estimate, expected in (((2.,1.,None),1.5), ((10.,3.,None),5.), (None,1.5)):
             with self.subTest(estimate=estimate), patch.object(grab, 'estimate_height', return_value=estimate):
                 close, above, _ = grab.grab_heights(args, None, (1280,720))

@@ -27,6 +27,9 @@ import requests
 from PIL import Image
 
 import target_selector_v5 as ts
+import small_object_grasp as small_grasp
+
+PICKUP_BUILD = 'small-object-profiles-v1'
 
 
 def base_pixel(mask):
@@ -178,15 +181,14 @@ def in_reach(a, cand):
 _camera = {"key": None, "geo": None}
 
 
-def estimate_height(a, mask, img_size):
-    """How tall the object is (cm), from where the camera sits (worked out from the calibration)
-    and the top and bottom of its outline. None if it can't be worked out."""
+def camera_geometry(a, img_size):
+    """Approximate camera geometry from the saved table marks; no motion."""
     import height
     st = requests.get(a.arm_url + "/status", timeout=10).json()
     pairs, size = st.get("pairs") or [], st.get("size") or img_size[0]
     if len(pairs) < 8:
         return None
-    key = (len(pairs), size, tuple(pairs[0]), tuple(pairs[-1]))
+    key = (size, img_size, tuple(tuple(p) for p in pairs))
     if _camera["key"] != key:
         scale = img_size[0] / size
         scaled = [[u * scale, v * scale, x, y] for u, v, x, y in pairs]
@@ -195,10 +197,17 @@ def estimate_height(a, mask, img_size):
         except (ValueError, np.linalg.LinAlgError):
             _camera["geo"] = None
         _camera["key"] = key
-    if _camera["geo"] is None:
+    return _camera['geo']
+
+
+def estimate_height(a, mask, img_size):
+    """Legacy upright-object estimate; named small-object profiles override it."""
+    import height
+    geometry = camera_geometry(a, img_size)
+    if geometry is None:
         print("  (size estimate: couldn't work out where the fixed camera sits from the calibration)")
         return None
-    K, R, _, C, up = _camera["geo"]
+    K, R, _, C, up = geometry
 
     def table_of_pixel(u, v):
         xy = requests.post(a.arm_url + "/api/click", json={"u": u, "v": v}, timeout=10).json()
@@ -222,12 +231,15 @@ FALLBACK_CLOSE_CM = 1.5   # where the jaws close when the object's height couldn
 def grab_heights(a, mask, img_size):
     """Where the jaws close and where they come from, for this object.
     --close given: always that. Otherwise about half the object's estimated height."""
-    est = estimate_height(a, mask, img_size)
+    profile = small_grasp.profile_for(getattr(a,'last_text',''))
+    est = (profile['height_hint_cm'], profile.get('diameter_cm'), None) if profile else estimate_height(a, mask, img_size)
     measured = getattr(a, 'object_height', None)
     if measured is not None:
         est = (measured, est[1] if est else None, est[2] if est else None)
     if a.close is not None:
         return a.close, a.above, est
+    if profile is not None and measured is None:
+        return profile['grip_height_cm'], a.above, est
     if est is None or est[0] is None:
         return FALLBACK_CLOSE_CM, a.above, est           # height unknown: low enough for small things
     h = est[0]
@@ -238,14 +250,14 @@ def grab_heights(a, mask, img_size):
     return round(close, 1), max(a.above, round(h + 5, 1)), est
 
 
-def detect_fixed(img, text):
+def detect_fixed(img, text, force_zoom=False):
     """SAM 3 on the fixed camera picture. If nothing shows up, look again more closely:
     zoom into the table (left and right half, 2x) and accept weaker matches, so small or far
     objects that are only a few pixels wide still get found. Masks always come back full size."""
     import cv2
     ts.VLM_BACKEND = "none"
-    res = ts.decide(img, text, None)
-    if res["candidates"]:
+    res = small_grasp.detect(img, text, ts.decide) if not force_zoom else {'candidates':[]}
+    if res["candidates"] and not force_zoom:
         return res
     print("  nothing at first glance, zooming in on the table...")
     W, H = img.size
@@ -259,7 +271,7 @@ def detect_fixed(img, text):
             box = (x0, top, x0 + half, H)
             crop = img.crop(box)
             big = crop.resize((crop.width * 2, crop.height * 2), Image.BICUBIC)
-            r = ts.decide(big, text, None)
+            r = small_grasp.detect(big, text, ts.decide, exhaustive=force_zoom)
             for c in r["candidates"]:
                 m = cv2.resize(np.asarray(c["mask"]).astype(np.uint8), crop.size, interpolation=cv2.INTER_NEAREST)
                 full = np.zeros((H, W), bool)
@@ -345,6 +357,7 @@ Try joints 7, 4, 5, 6 with +3: keep the one that makes it lean less, undo the ot
 
 def find_and_grab(a, text):
     """Find `text` in the fixed camera (by look; if nothing looks like it, by writing) and grab it."""
+    import cv2
     a.last_text = text
     st = requests.get(a.arm_url + "/status", timeout=10).json()
     print('Controller build: ' + str(st.get('capabilities', {}).get('controller_build', 'unknown')))
@@ -355,26 +368,64 @@ def find_and_grab(a, text):
         print("The controller runs with --read-only: restart it without that to move the arm.")
         return
     img = Image.open(io.BytesIO(requests.get(a.arm_url + "/frame.jpg", timeout=10).content)).convert("RGB")
+    from pathlib import Path
+    Path('pick_views').mkdir(exist_ok=True)
+    img.save('pick_views/standing_input.jpg')
+    Image.new('L',img.size,0).save('pick_views/selected_mask.png')
+    profile = small_grasp.profile_for(text)
     res = detect_fixed(img, text)
     if res["candidates"]:
-        near = []
-        for c in res["candidates"]:
-            xy, ok = in_reach(a, c)
-            c["out_of_reach"] = not ok
-            where = f"x={xy[0]:.0f}, y={xy[1]:.0f}" if xy else "?"
-            print(f"  candidate {c['target_score']:.2f} at {where} cm: " + ("in reach" if ok else "out of reach, ignored"))
-            if ok:
-                near.append(c)
+        def reachable(candidates):
+            near = []
+            for c in candidates:
+                xy, ok = in_reach(a, c)
+                c['table_xy'] = xy
+                c["out_of_reach"] = not ok
+                where = f"x={xy[0]:.0f}, y={xy[1]:.0f}" if xy else "?"
+                print(f"  candidate {c['target_score']:.2f} at {where} cm: " + ("in reach" if ok else "out of reach, ignored"))
+                if ok:
+                    near.append(c)
+            return near
+        near = reachable(res['candidates'])
+        if not near and profile:
+            print('  only background/out-of-workspace matches; retrying close-up table views')
+            res = detect_fixed(img,text,force_zoom=True)
+            near = reachable(res['candidates'])
         if not near:
             show_view(img, res["candidates"], None, None, None, f"'{text}': found, but nothing within reach")
             print(f"Found '{text}', but nothing within the arm's reach. Not grabbing.")
             return
         best = max(near, key=lambda c: c["target_score"])   # the highest score among what the arm can reach
+        Image.fromarray(np.asarray(best['mask'],dtype=np.uint8)*255).save('pick_views/selected_mask.png')
         u, v = base_pixel(np.asarray(best["mask"]))
         close, above, est = grab_heights(a, best["mask"], img.size)
-        tall = f"about {est[0]:.1f} cm tall, " if est and est[0] else ""
+        aim = None
+        if profile:
+            print(f"Automatic profile: {profile['name']}; closing at {close:g} cm")
+            if profile['name'] == 'black cap':
+                print('  cap height range 0.5–1.0 cm; 0.5 cm is the fingertip clearance limit')
+            try:
+                geometry = camera_geometry(a,img.size)
+                if geometry is not None:
+                    candidate_aim = small_grasp.aim_from_mask(profile,best['mask'],geometry)
+                    xy = candidate_aim['xy_cm']
+                    radial = np.hypot(xy[0],xy[1]-BASE_Y_CM)
+                    if (np.isfinite(xy).all() and REACH_CM[0] <= radial <= REACH_CM[1]
+                            and np.linalg.norm(np.asarray(xy)-best['table_xy']) <= 2.):
+                        aim = candidate_aim
+                        u,v = small_grasp.project(np.array([[*xy,0.]]),geometry)[0]
+                        print('  centre estimate: ' + aim['orientation'])
+                    else:
+                        print('  object-centre fit disagrees with standing aim; retaining standing aim')
+            except (ValueError, np.linalg.LinAlgError, cv2.error) as exc:
+                print(f'  object-centre fit unavailable: {exc}')
+        tall = (profile['name'] + ' profile, ') if profile else (f"about {est[0]:.1f} cm tall, " if est and est[0] else "")
         show_view(img, res["candidates"], best, u, v, f"'{text}': {tall}closing at {close} cm")
-        return go(a, img, u, v, f"'{text}'", best["target_score"], close, above, est)
+        return go(a, img, u, v, f"'{text}'", best["target_score"], close, above, est, aim=aim)
+    if profile:
+        show_view(img, [], None, None, None, f"'{text}': no matching object found")
+        print('No matching object found after named-object and zoom retries; not grabbing.')
+        return
     print(f"Nothing looks like '{text}'. Looking for it written on something...")
     try:
         hit = find_word(img, text)
@@ -431,15 +482,16 @@ def main(argv=None):
     wrist.add_argument("--no-hand", dest="no_hand", action="store_true",
                        help="use standing-camera guidance only")
     ap.set_defaults(no_hand=False)
-    ap.add_argument("--reach-out", type=float, default=1.0, metavar="CM",
+    ap.add_argument("--reach-out", type=float, default=None, metavar="CM",
                     help="aim this many cm further from the base than measured, because the arm tends to "
-                         "stop short (default 1; 0 = off)")
+                         "stop short (default 0 for named small-object profiles, 1 otherwise)")
     ap.add_argument("--no-feel", action="store_true",
                     help="don't feel for the table on the way down (the old way: trust the table's height)")
     ap.add_argument("--dry", action="store_true", help="find things and say where, never move")
     a = ap.parse_args(argv)
     if a.object_height is not None and (not np.isfinite(a.object_height) or a.object_height <= .5):
         ap.error('--object-height must exceed 0.5 cm; shorter objects need a validated lower fingertip clearance')
+    print('Pickup build: ' + PICKUP_BUILD)
     print('Pickup guidance: ' + ('standing camera only; wrist alignment OFF' if a.no_hand else
                                 'standing camera + wrist alignment ON'))
 
@@ -524,7 +576,7 @@ def find_in_hand(a, text, near=None, tries=3):
                 crop = (max(0, int(near[0] - radius)), max(0, int(near[1] - radius)),
                         min(img.width, int(near[0] + radius)), min(img.height, int(near[1] + radius)))
                 view = img.crop(crop)
-            res = ts.decide(view, text, None)
+            res = small_grasp.detect(view, text, ts.decide)
         finally:
             ts.SAM_SCORE_MIN = old
         cands, distant = [], 0
@@ -536,7 +588,7 @@ def find_in_hand(a, text, near=None, tries=3):
                 full[crop[1]:crop[3], crop[0]:crop[2]] = mask
                 mask = full
             c['mask'] = mask
-            if mask.sum() < 60:
+            if mask.sum() < (20 if small_grasp.profile_for(text) else 60):
                 continue
             ys, xs = np.nonzero(mask)
             centre = np.array([xs.mean(), ys.mean()])
@@ -628,6 +680,9 @@ def hand_correct(a, text, x, y, obj_h=None):
     import json
     import os
     a.wrist_alignment_used = False
+    profile = small_grasp.profile_for(text)
+    max_fix = 2. if profile else MAX_FIX_CM
+    max_step = .5 if profile else 2.
     if a.no_hand:
         return x, y
     if not os.path.exists(HAND_FILE):
@@ -649,7 +704,8 @@ def hand_correct(a, text, x, y, obj_h=None):
         pass
     # 1. find it: look straight above the fixed camera's aim; if it isn't in view, look around it
     found = None
-    for k, (dx, dy) in enumerate(SEARCH_CM):
+    search = [(0,0),(0,-1),(0,1),(-1,0),(1,0)] if profile else SEARCH_CM
+    for k, (dx, dy) in enumerate(search):
         lx, ly = x + dx, y + dy
         goto(a, lx, ly, look)
         p, img, best = find_in_hand(a, text, near=target, tries=2 if k == 0 else 1)
@@ -681,8 +737,8 @@ def hand_correct(a, text, x, y, obj_h=None):
             return x0, y0
         last = np.hypot(*d)
         nx, ny = x + d[0], y + d[1]
-        if np.hypot(nx - x0, ny - y0) > MAX_FIX_CM:
-            print(f"  gripper camera wants more than {MAX_FIX_CM} cm from the fixed camera's aim: not trusting it")
+        if np.hypot(nx - x0, ny - y0) > max_fix:
+            print(f"  gripper camera wants more than {max_fix} cm from the fixed camera's aim: not trusting it")
             return x0, y0
         if np.hypot(*d) < 0.3:
             a.wrist_alignment_used = True
@@ -690,7 +746,7 @@ def hand_correct(a, text, x, y, obj_h=None):
         if step == 4:
             print('  gripper camera: alignment not confirmed after five looks; using standing-camera aim')
             return x0, y0
-        d *= min(1., 2. / max(1e-9, np.hypot(*d)))  # at most 2 cm per observed correction
+        d *= min(1., max_step / max(1e-9, np.hypot(*d)))
         track_near = np.asarray(p) + J @ d
         x, y = x + d[0], y + d[1]
     print(f"  gripper camera: aim moved by {np.hypot(x - x0, y - y0):.1f} cm in total")
@@ -729,8 +785,10 @@ GRIPPER_OPEN_CM = 5.1    # jaw gap when fully open (100 %)
 SQUEEZE_CM = 1.0         # close the jaws this much narrower than the object: holds without crushing
 
 
-def go(a, img, u, v, what, score, close=None, above=None, est=None):
-    where = requests.post(a.arm_url + "/api/click", json={"u": u, "v": v, "size": img.width}, timeout=10).json()
+def go(a, img, u, v, what, score, close=None, above=None, est=None, aim=None):
+    profile = small_grasp.profile_for(getattr(a,'last_text',''))
+    where = ({'x':aim['xy_cm'][0], 'y':aim['xy_cm'][1]} if aim else
+             requests.post(a.arm_url + "/api/click", json={"u": u, "v": v, "size": img.width}, timeout=10).json())
     print(f"Found {what} (score {score:.2f}) at pixel {u:.0f},{v:.0f} "
           f"-> table x={where.get('x')}, y={where.get('y')} cm")
     close = close if close is not None else (a.close if a.close is not None else 3.0)
@@ -738,6 +796,7 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None):
     h, width, center = est if est else (None, None, None)
     source = ('manual override' if a.close is not None else
               'measured object height' if getattr(a, 'object_height', None) is not None else
+              profile['name'] + ' automatic low-grip profile' if profile else
               'height estimate' if h else 'fallback; object height unknown')
     print(f"Planned closing height: {close:g} cm above the calibrated table ({source}); approach {above:g} cm.")
     if not a.side and not a.no_feel:
@@ -746,6 +805,11 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None):
         return
     body = {"u": u, "v": v, "size": img.width, "height": close, "above": above,
             "method": "side" if a.side else "top"}
+    if profile:
+        body['pickup_build'] = PICKUP_BUILD
+        body['object_profile'] = profile['name']
+        body['height_source'] = source
+        body['centre_fit'] = aim
     if not a.side and not a.no_feel:
         # Keep the friend's guarded descent, but honour the height already
         # computed above. feel_all_the_way would discard it and search below
@@ -753,23 +817,28 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None):
         body["guard"] = True
     if not a.side and where.get("x") is not None:
         gx, gy = float(where["x"]), float(where["y"])
+        if profile:
+            body['standing_xy_cm'] = [gx,gy]
         a.wrist_alignment_used = False
         if not a.no_hand:
             try:
                 gx, gy = hand_correct(a, a.last_text, gx, gy, h)
             except (RuntimeError, ValueError, requests.RequestException, np.linalg.LinAlgError) as e:
                 print(f"  gripper camera skipped: {e}")
-        if a.reach_out and not a.wrist_alignment_used:
+        reach_out = a.reach_out if a.reach_out is not None else (0. if profile else 1.)
+        if reach_out and not a.wrist_alignment_used:
             # The arm tends to stop a little short, towards its base. Aim this far further out,
             # straight away from the base (--reach-out, cm).
             r = np.array([gx, gy - BASE_Y_CM])
             n = np.linalg.norm(r)
             if n > 1e-6:
                 r = r / n
-                gx, gy = gx + a.reach_out * r[0], gy + a.reach_out * r[1]
-                print(f"  aiming {a.reach_out:g} cm further out: x={gx:.1f}, y={gy:.1f}")
+                gx, gy = gx + reach_out * r[0], gy + reach_out * r[1]
+                print(f"  aiming {reach_out:g} cm further out: x={gx:.1f}, y={gy:.1f}")
         elif a.wrist_alignment_used:
             print('  wrist alignment confirmed; no extra outward offset')
+        if profile:
+            body['wrist_alignment_used'] = a.wrist_alignment_used
         body.pop("u"); body.pop("v")
         body["x"], body["y"] = round(gx, 2), round(gy, 2)
     if h:

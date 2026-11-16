@@ -292,6 +292,44 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(submitted[-1][1]['guard'])
         self.assertEqual(self.reacher.grab.await_args.args[2],1.5)
 
+    async def test_automatic_small_objects_use_same_command_and_low_height(self):
+        import grab_text
+        from test_small_object_grasp import cylinder_mask
+        self.app.camera.locate = Mock(return_value=(3.,25.))
+        def post(url, json, timeout):
+            import json as wire_json
+            name = url.rsplit('/',1)[1]
+            body = wire_json.loads(wire_json.dumps(json))
+            submitted.append((name,body))
+            result = asyncio.run(self.app.api(name,body))
+            return Mock(json=lambda:{'ok':True,**result})
+        for text,mask in [('small white cylinder',cylinder_mask('upright')),
+                          ('small white cylinder',cylinder_mask('sideways')),
+                          ('small black cap',cylinder_mask('sideways'))]:
+            with self.subTest(text=text):
+                with patch.object(grab_text,'find_and_grab') as pick, redirect_stdout(io.StringIO()):
+                    grab_text.main(['--text',text])  # no height, posture or camera switches
+                args,_ = pick.call_args.args
+                args.last_text = text
+                self.assertFalse(args.no_hand)
+                submitted=[]
+                with patch.object(grab_text.requests,'post',side_effect=post), \
+                        patch.object(grab_text.requests,'get',return_value=Mock(json=lambda:{'log':'test'})), \
+                        patch.object(grab_text,'hand_correct',return_value=(3.,25.)) as wrist, \
+                        patch.object(grab_text,'estimate_height',side_effect=AssertionError('No generic height guess')), \
+                        redirect_stdout(io.StringIO()):
+                    close,above,est = grab_text.grab_heights(args,mask,(1280,720))
+                    await asyncio.to_thread(grab_text.go,args,Image.new('RGB',(1280,720)),600,600,
+                                            text,.8,close,above,est)
+                body = submitted[-1][1]
+                self.assertEqual(body['height'],.5)
+                self.assertEqual((body['x'],body['y']),(3.,25.))
+                self.assertTrue(body['guard'])
+                self.assertNotIn('feel_all_the_way',body)
+                self.assertEqual(body['pickup_build'],'small-object-profiles-v1')
+                self.assertEqual(self.reacher.grab.await_args.args[2],.5)
+                wrist.assert_called_once()
+
     async def test_numeric_guarded_grab_closes_and_lifts_without_seeking_table(self):
         reach = self.reach_module.Reacher.__new__(self.reach_module.Reacher)
         reach.arm = types.SimpleNamespace(move=AsyncMock(), close_gripper=AsyncMock(return_value=(True,20.)),

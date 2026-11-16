@@ -24,6 +24,15 @@ class WristSelectionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'stale'):
                 grab.hand_frame(types.SimpleNamespace(arm_url='http://offline-test'))
 
+    def test_tiny_cap_match_is_not_discarded_by_large_object_area_cutoff(self):
+        mask=np.zeros((720,1280),dtype=bool); mask[423:428,618:623]=True
+        img=Image.new('RGB',(1280,720))
+        response={'candidates':[{'mask':mask,'box':[618,423,623,428],'target_score':.8}]}
+        with patch.object(grab,'hand_frame',return_value=img), \
+                patch.object(grab.ts,'decide',return_value=response), patch('time.sleep'):
+            point,_,_=grab.find_in_hand(types.SimpleNamespace(),'small black cap',near=(620.,425.),tries=1)
+        self.assertEqual(point,(620.,425.))
+
     def find(self, responses, tries=2):
         img = Image.new('RGB', (1280, 720))
         with patch.object(grab, 'hand_frame', return_value=img), \
@@ -55,7 +64,7 @@ class WristSelectionTests(unittest.TestCase):
         self.assertEqual(best['mask'].shape, (720,1280))
         self.assertEqual(detect.call_args_list[1].args[0].size, (640,615))
 
-    def align(self, points):
+    def align(self, points, text='small bottle'):
         args = types.SimpleNamespace(no_hand=False, arm_url='http://offline-test')
         cal = {'target_px': [620.,425.], 'px_per_cm': [[17.25,0.],[0.,17.25]],
                'at': [0.,25.], 'look_above': 13.}
@@ -66,7 +75,7 @@ class WristSelectionTests(unittest.TestCase):
                 patch.object(grab,'goto') as move, patch.object(grab,'save_hand_view'), \
                 patch.object(grab,'find_in_hand',side_effect=[(p,img,None) for p in points]), \
                 redirect_stdout(io.StringIO()):
-            xy = grab.hand_correct(args, 'small bottle', 0.,25.,4.)
+            xy = grab.hand_correct(args, text, 0.,25.,4.)
         return xy,args,move
 
     def test_large_valid_correction_uses_small_steps_and_observes_final_position(self):
@@ -86,6 +95,19 @@ class WristSelectionTests(unittest.TestCase):
         self.assertEqual(xy,(0.,25.))
         self.assertFalse(args.wrist_alignment_used)
         self.assertEqual(move.call_count,5)
+
+    def test_profile_corrections_are_half_centimetre_steps(self):
+        xy,args,move = self.align([(594.125,425.),(602.75,425.),(611.375,425.),(620.,425.)],
+                                 text='small white cylinder')
+        self.assertEqual(xy,(1.5,25.))
+        self.assertTrue(args.wrist_alignment_used)
+        self.assertEqual([c.args[1] for c in move.call_args_list],[0.,.5,1.,1.5])
+
+    def test_profile_rejects_wrist_shift_larger_than_two_centimetres(self):
+        xy,args,move = self.align([(568.25,425.)],text='small black cap')
+        self.assertEqual(xy,(0.,25.))
+        self.assertFalse(args.wrist_alignment_used)
+        self.assertEqual(move.call_count,1)
 
 
 if __name__ == '__main__':

@@ -1,11 +1,27 @@
-# Current pickup: tapered compensation and local wrist alignment
+# Current pickup: automatic small-object profiles and both cameras
 
-Branch: `feel-grab-reachy`. Running controller build: **`descent-taper-v1`**.
+Branch: `feel-grab-reachy`. Pickup build: **`small-object-profiles-v1`**.
+Running controller build: **`descent-taper-v1`**.
 Both standing and wrist guidance are enabled by default in `grab_text.py`.
 Use `--no-hand` only for an explicit standing-only comparison.
 
 ## What changed
 
+- `small white cylinder` selects the operator's measured 2 cm long, 1 cm diameter
+  object. The same prompt works for standing and sideways poses. SAM retries
+  alternate descriptions of that same cylinder and closer table crops when
+  needed. Projected upright/sideways shape hypotheses estimate its XY centre;
+  uncertain orientation is labelled explicitly. Closing height is 0.5 cm for
+  either pose, so an uncertain pose cannot restore the old 1.5 cm minimum.
+- `small black cap` selects a low-object profile using the supplied 5–10 mm
+  height range. It also closes at 0.5 cm, without a per-run measurement. A cap
+  exactly 5 mm high is at the current fingertip-clearance boundary: reliable
+  physical engagement there is not established. We have not lowered the
+  controller's clearance or added a search into the table.
+- Both profiles use the existing camera/table geometry. This is not general
+  depth sensing. Cylinder dimensions are known; the cap's 0.75 cm height hint
+  is a range midpoint, not a camera measurement. A centre fit differing by
+  more than 2 cm from the original standing aim is rejected.
 - Guarded descent preserves its initial servo reference, then tapers the previous
   pose's sag compensation to zero at the closing-height endpoint. It does not
   apply fresh sag-correction pulses just before closing. Existing settling and
@@ -17,10 +33,14 @@ Use `--no-hand` only for an explicit standing-only comparison.
   expected object before comparing confidence. A second look crops around the
   expected object using the same text prompt. It no longer substitutes an
   arbitrary "small white object" when the requested object is missing.
-- Wrist corrections are limited to 2 cm per move, with at most five looks and
+- For these profiles, wrist corrections are limited to 0.5 cm per move and 2 cm
+  total suggested displacement from the standing aim; hover searches stay within
+  1 cm. Other objects retain the 2 cm step / 8 cm displacement limits.
+  There are at most five alignment looks and
   another observation after every correction. Lost or unconfirmed targets revert
   to the standing aim. Confirmed wrist alignment skips the inherited extra 1 cm
-  outward offset. That offset remains for standing-only/fallback aiming.
+  outward offset. These profiles also skip that offset on standing-only/fallback
+  aiming; other objects retain it. `--reach-out` is an optional explicit override.
 - Each controller grab writes a JSON report under `config/local/grasp_runs`,
   including failures during motion. Reports contain the build, request, nominal
   heights, compensated motor-target heights, measured encoder/FK heights and
@@ -40,12 +60,16 @@ and 2.0 cm produced motor-target heights of 1.529, 2.696 and 1.990 cm. These are
 software checks, **not measured physical accuracy**. Real load, calibration and
 motor response still need a physical test.
 
-The offline suite passes **135 tests**, covering descent reference continuity,
+The offline suite passes **149 tests**, covering descent reference continuity,
 endpoint compensation, speed bounds, contact backoff, partial-path labelling,
 default camera mode, distant wrist detections, local crop coordinates, stale
 frames, target loss, correction limits, close/lift without contact, and report
-persistence on motion errors. SAM outputs and hardware feedback are mocked;
-no local robot or GPU inference was used.
+persistence on motion errors. New checks cover cylinder poses at different
+table positions, alternate prompts, background-only detection retries, tiny
+wrist masks, profile correction limits, and the actual client-to-controller
+request path for upright/sideways cylinder and cap. SAM outputs and hardware
+feedback are mocked; no local robot or GPU inference was used. Synthetic shape
+fits do not establish physical calibration accuracy or real-image detection recall.
 
 ## Linux update and start
 
@@ -73,21 +97,31 @@ Pickup terminal:
 
 ```bash
 cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
-.venv/bin/python -u -B grab_text.py --hand 2>&1 | tee pickup_test.log
+.venv/bin/python -u -B grab_text.py --hand
 ```
 
-Type an object at `What now?`. It should print `Controller build: descent-taper-v1`
-and `standing camera + wrist alignment ON`. A confirmed wrist correction prints
+Type `small white cylinder` at `What now?`, whether it is upright or sideways.
+On another attempt type `small black cap`. No `--close` or `--object-height`
+is needed. Startup should print `Pickup build: small-object-profiles-v1` and
+`standing camera + wrist alignment ON`; each request should print
+`Controller build: descent-taper-v1` and `Automatic profile: ...; closing at 0.5 cm`.
+A confirmed wrist correction prints
 `wrist alignment confirmed; no extra outward offset`. If wrist detection is
 unavailable or uncertain, the terminal explicitly reports standing-camera fallback.
 Pulling does not update running Python processes; restart both programs.
 
-## A focused physical test within an hour
+## First physical test and remaining calibration limit
 
 Use one isolated known object in a small central pickup patch. The supplied
 plane disagreed with one touch near the bottle by 1.6 cm; software cannot turn
-that into a correct physical measurement. Recheck the table before relying on
-the new height endpoint. Keep both camera mounts fixed.
+that into a correct physical measurement. That uncertainty is larger than these
+objects' grip clearance. Keep both camera mounts fixed and watch the first
+attempt. Stop if the fingers press the table. Try the cylinder upright, then
+sideways, then the cap using the same interactive program. Several consecutive
+successes in one patch are needed before expanding the pickup area.
+
+If physical height still disagrees, the existing optional local Z-plane repair
+procedure is below. It is not part of the automatic object-selection command.
 
 With controller/pickup stopped, Station running, and the follower controlled by
 the leader in mirroring mode, back up and re-teach the local Z plane:
@@ -113,26 +147,14 @@ investigate the touch/pose/calibration before another automatic pick. Exit
 `where` with Ctrl+C, then restart the controller, select Self-controlled and
 Hold arm. This teaches the Z plane; it does not recalibrate camera XY mapping.
 
-For the known 2 cm cylinder only, a controlled first trial can use:
+## Other objects and optional overrides
 
-```bash
-cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
-.venv/bin/python -u -B grab_text.py --hand --object-height 2 --text "small white cylinder" 2>&1 | tee pickup_test.log
-```
-
-Here `--object-height 2` supplies the cylinder's **measured 2 cm height**. Its
-closing height becomes 1 cm above the saved table plane. This isolates motion
-from the approximate RGB height estimate. For a short cap, measure its height
-in the intended picking orientation and supply that value in centimetres. With
-a measured height, the closing-height floor is 0.5 cm. Measured objects no taller
-than 0.5 cm are refused before motion; they need a validated lower fingertip
-clearance, not a guess from this script.
-
-Omit `--object-height` for automatic height selection. Its existing policy is
-half the RGB-estimated height, clamped to 1.5–6 cm; unknown height uses 1.5 cm.
-That automatic policy is not suitable for an unmeasured very thin cap. Neither
-policy supplies measured depth. `--close` remains a manual fingertip-height
-override, not a jaw-width command.
+Objects without one of these named profiles retain the older policy: half the
+RGB-estimated upright height, clamped to 1.5–6 cm; unknown height uses 1.5 cm.
+It is not a reliable automatic height estimator for arbitrary sideways or thin
+objects. `--object-height CM` remains an optional measured-height override and
+must exceed 0.5 cm. `--close CM` overrides the fingertip closing height, not the
+jaw width. Do not use either override for the automatic cylinder/cap test.
 
 Seek several consecutive successes in the same verified patch before expanding
 positions or changing objects. Always-correct pickup of arbitrary objects is
@@ -150,5 +172,7 @@ cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
 .venv/bin/python -B collect_arm_debug.py
 ```
 
-This performs read-only collection and creates a ZIP in Downloads. Transfer it
+This performs read-only collection and creates a ZIP in Downloads, including
+the original standing frame, selected segmentation mask, wrist images and
+recent controller reports. Transfer it
 to your computer and attach it in the chat. It does not upload automatically.

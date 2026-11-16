@@ -42,7 +42,9 @@ def main():
         z.writestr('running_programs.txt', '\n'.join(running) + '\n' + stderr)
         files = list((root/'controller/calib').glob('*.json'))
         files += list((root/'pick_views').glob('hand_latest_*.jpg'))
-        files += [root/'pick_views/latest.jpg', root/'grab_text.py', root/'pickup_test.log']
+        files += [root/'pick_views/latest.jpg', root/'pick_views/standing_input.jpg',
+                  root/'pick_views/selected_mask.png', root/'grab_text.py',
+                  root/'small_object_grasp.py', root/'pickup_test.log']
         files += [root/'controller/arm'/name for name in
                   ('reach.py','click.py','arm.py','kinematics.py','vision_contract.py')]
         reports = sorted((root/'config/local/grasp_runs').glob('*.json'),

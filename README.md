@@ -1,9 +1,15 @@
 # LosPollosCV_Arm
 
-**Active branch: `feel-grab-reachy`. Controller build: `descent-taper-v1`.**
+**Active branch: `feel-grab-reachy`. Pickup build: `small-object-profiles-v1`.
+Controller build: `descent-taper-v1`.**
 The friend's pickup flow now tapers hover compensation to zero during descent,
 keeps the planned closing height, and uses standing + wrist guidance by default.
 Wrist matching excludes distant detections and verifies each small correction.
+Type `small white cylinder` for the measured 2 × 1 cm cylinder, standing or lying
+sideways, or `small black cap` for the reported 5–10 mm cap. These names select
+automatic low-grip profiles; no per-run height or orientation flag is needed.
+They use known dimensions/ranges, not measured RGB depth. The 5 mm cap remains
+at the minimum fingertip-clearance boundary and needs physical validation.
 To use **both cameras**,
 start the controller with `--camera /dev/video4 --hand-camera /dev/video6`
 and run `.venv/bin/python -B grab_text.py --hand` from the repository root. See
