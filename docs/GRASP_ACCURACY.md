@@ -1,6 +1,6 @@
 # Current pickup: automatic small-object profiles and both cameras
 
-Branch: `feel-grab-reachy`. Pickup build: **`fine-centering-v3.1`**.
+Branch: `feel-grab-reachy`. Pickup build: **`fine-centering-v3.2`**.
 Running controller build: **`descent-taper-v1`**.
 Both standing and wrist guidance are enabled by default in `grab_text.py`.
 Use `--no-hand` only for an explicit standing-only comparison.
@@ -60,7 +60,8 @@ Use `--no-hand` only for an explicit standing-only comparison.
   outward offset. These profiles also skip that offset on standing-only/fallback
   aiming; other objects retain it. `--reach-out` is an optional explicit override.
 - Wrist diagnostics record the standing aim, saved jaw target pixel, each
-  observed object centre, estimated offset, frame IDs and outcome (aligned,
+  observed object centre, estimated offset, frame IDs, controller-reported hover
+  tilt and outcome (aligned,
   lost target, excessive correction, unconfirmed, etc.). They are included in
   the controller request/report and `pick_views/wrist_alignment.json`. An
   accepted wrist aim is still a hover alignment. This change does not establish
@@ -85,7 +86,7 @@ and 2.0 cm produced motor-target heights of 1.529, 2.696 and 1.990 cm. These are
 software checks, **not measured physical accuracy**. Real load, calibration and
 motor response still need a physical test.
 
-The offline suite passes **165 tests**, covering descent reference continuity,
+The offline suite passes **174 tests**, covering descent reference continuity,
 endpoint compensation, speed bounds, contact backoff, partial-path labelling,
 default camera mode, distant wrist detections, local crop coordinates, stale
 frames, target loss, correction limits, close/lift without contact, and report
@@ -105,6 +106,10 @@ upright-cylinder tests retain their previous centering behaviour.
 Result-reporting tests distinguish a completed request from a detected hold,
 prioritize slip/failure evidence, preserve uncertainty for missing or conflicting
 results, and verify the actual terminal path without an additional status poll.
+Comparison tests preserve unknown values, distinguish settled closing positions
+from descent samples, label feedback separately from physical success, and read
+ZIP reports without extracting files. The collector includes the comparison.
+Tilt-recording tests verify that the outgoing move command is unchanged.
 
 ## Linux update and start
 
@@ -137,7 +142,7 @@ cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
 
 Type `small white cylinder` at `What now?`, whether it is upright or sideways.
 On another attempt type `small black cap`. No `--close` or `--object-height`
-is needed. Startup should print `Pickup build: fine-centering-v3.1` and
+is needed. Startup should print `Pickup build: fine-centering-v3.2` and
 `standing camera + wrist alignment ON`; each request should print
 `Controller build: descent-taper-v1`, `Automatic profile: ...; closing at ... cm`
 and `Height decision: ...` explaining the chosen height or fallback.
@@ -248,3 +253,31 @@ the original standing frame, selected segmentation mask, wrist images,
 `wrist_alignment.json` and
 recent controller reports. Transfer it
 to your computer and attach it in the chat. It does not upload automatically.
+
+## Compare two attempts without moving the arm
+
+From the repository root, after at least two completed attempts:
+
+```bash
+python3 -B compare_grabs.py
+```
+
+This uses only the Python standard library and reads the last two local controller
+reports. It does not load SAM, open cameras or contact the controller. To compare
+two previously collected debug ZIPs instead:
+
+```bash
+python3 -B compare_grabs.py "$HOME/Downloads/first.zip" "$HOME/Downloads/second.zip"
+```
+
+Use the actual filenames. With one ZIP it compares its newest two stored reports;
+with two ZIPs it selects the newest report from each. Optional `--out comparison.txt`
+saves the printed result. `collect_arm_debug.py` automatically includes
+`grasp_comparison.txt` when at least two local reports are available.
+
+The comparison shows pose/height decisions, wrist acceptance or fallback, final
+wrist offset, requested target, settled pre-close encoder/FK position, descent
+sample XY change, hover/pickup tilts and controller outcome. Unknown evidence is
+not zero error. A tilt difference or model-space error is a lead to investigate,
+not proof of a physical failure cause. The two selected reports are not assumed
+to be a success/failure pair; compare each with its own images and observed result.

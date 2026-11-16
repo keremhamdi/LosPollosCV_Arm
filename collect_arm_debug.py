@@ -44,7 +44,7 @@ def main():
         files += list((root/'pick_views').glob('hand_latest_*.jpg'))
         files += [root/'pick_views/latest.jpg', root/'pick_views/standing_input.jpg',
                   root/'pick_views/selected_mask.png', root/'pick_views/wrist_alignment.json', root/'grab_text.py',
-                  root/'small_object_grasp.py', root/'pickup_test.log']
+                  root/'small_object_grasp.py', root/'compare_grabs.py', root/'pickup_test.log']
         files += [root/'controller/arm'/name for name in
                   ('reach.py','click.py','arm.py','kinematics.py','vision_contract.py')]
         reports = sorted((root/'config/local/grasp_runs').glob('*.json'),
@@ -52,6 +52,13 @@ def main():
         for p in files + reports[:3]:
             if p.is_file():
                 z.write(p, str(p.relative_to(root)))
+        if len(reports) >= 2:
+            try:
+                from compare_grabs import read_reports, render
+                comparison = [read_reports(p)[-1] for p in reversed(reports[:2])]
+                z.writestr('grasp_comparison.txt', render(comparison))
+            except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                z.writestr('grasp_comparison_error.txt', str(exc))
         for name in ('status','pose','model'):
             try:
                 with urlopen('http://127.0.0.1:8890/' + name, timeout=3) as response:

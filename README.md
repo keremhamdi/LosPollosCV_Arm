@@ -4,7 +4,7 @@ Continuing this project with another LLM? Read or paste
 [CONTINUE_HERE.txt](CONTINUE_HERE.txt): branch, working behaviour, unresolved
 sideways-cylinder/cap centring, evidence, and Linux commands.
 
-**Active branch: `feel-grab-reachy`. Pickup build: `fine-centering-v3.1`.
+**Active branch: `feel-grab-reachy`. Pickup build: `fine-centering-v3.2`.
 Controller build: `descent-taper-v1`.**
 The friend's pickup flow now tapers hover compensation to zero during descent,
 keeps the planned closing height, and uses standing + wrist guidance by default.
@@ -16,6 +16,10 @@ not measured physical accuracy; the wrist calibration still needs to be correct.
 Pickup results distinguish `HOLD DETECTED`, `MISSED`, `SLIPPED`, `FAILED` and
 `UNCONFIRMED`. Holding is inferred from gripper feedback, not a camera-verified
 lift of the requested object. Visually confirm it leaves the table with the claws.
+`python3 -B compare_grabs.py` compares the last two recorded attempts without
+loading SAM or contacting the robot. Debug ZIPs include that comparison when two
+reports exist. New wrist traces also record the controller-reported hover tilt
+for comparison with pickup tilt; recording it does not change motion.
 Type `small white cylinder` for the measured 2 × 1 cm cylinder, standing or lying
 sideways, or `small black cap` for the reported 5–10 mm cap. These names select
 profiles; no per-run height or orientation flag is needed. An accepted upright

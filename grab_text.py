@@ -29,7 +29,7 @@ from PIL import Image
 import target_selector_v5 as ts
 import small_object_grasp as small_grasp
 
-PICKUP_BUILD = 'fine-centering-v3.1'
+PICKUP_BUILD = 'fine-centering-v3.2'
 
 
 def base_pixel(mask):
@@ -661,6 +661,7 @@ def goto(a, x, y, h):
     r = requests.post(a.arm_url + "/api/goto", json={"x": x, "y": y, "height": h}, timeout=120).json()
     if not r.get("ok"):
         raise RuntimeError(r.get("error") or "move failed")
+    return r.get('tilt')
 
 
 def hand_calibrate(a, text):
@@ -776,7 +777,7 @@ def _hand_correct(a, text, x, y, obj_h, fine):
     search = [(0,0),(0,-1),(0,1),(-1,0),(1,0)] if profile else SEARCH_CM
     for k, (dx, dy) in enumerate(search):
         lx, ly = x + dx, y + dy
-        goto(a, lx, ly, look)
+        hover_tilt = goto(a, lx, ly, look)
         p, img, best = find_in_hand(a, text, near=target, tries=2 if k == 0 else 1)
         report['search'].append({'xy_cm':[float(lx),float(ly)], 'found':p is not None})
         if p is not None:
@@ -799,7 +800,7 @@ def _hand_correct(a, text, x, y, obj_h, fine):
     for step in range(max_looks):
         if step:
             if move_needed:
-                goto(a, x, y, look)
+                hover_tilt = goto(a, x, y, look)
             p, img, best = find_in_hand(a, text, near=track_near, tries=2)
             if p is None:
                 print("  gripper camera: lost the requested object; using the standing-camera aim")
@@ -810,7 +811,8 @@ def _hand_correct(a, text, x, y, obj_h, fine):
         report['observations'].append({'step':step, 'xy_cm':[float(x),float(y)],
             'object_px':[float(v) for v in p], 'delta_cm':d.tolist(),
             'offset_cm':float(np.hypot(*d)), 'score':float(best['target_score']) if best else None,
-            'frame':getattr(a,'hand_frame_meta',None), 'image':f'pick_views/hand_latest_{step}.jpg'})
+            'frame':getattr(a,'hand_frame_meta',None), 'image':f'pick_views/hand_latest_{step}.jpg',
+            'hover_tilt_deg':float(hover_tilt) if type(hover_tilt) in (int,float) and np.isfinite(hover_tilt) else None})
         if step and np.hypot(*d) > last + 0.3:
             print("  gripper camera: getting worse, not trusting it, keeping the fixed camera's aim")
             return finish('correction_worsened', x0, y0)

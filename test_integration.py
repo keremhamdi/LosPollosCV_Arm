@@ -328,7 +328,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((body['x'],body['y']),(3.,25.))
                 self.assertTrue(body['guard'])
                 self.assertNotIn('feel_all_the_way',body)
-                self.assertEqual(body['pickup_build'],'fine-centering-v3.1')
+                self.assertEqual(body['pickup_build'],'fine-centering-v3.2')
                 self.assertEqual(self.reacher.grab.await_args.args[2],expected)
                 self.assertEqual(body['height_decision']['closing_height_cm'],expected)
                 if text == 'small black cap':

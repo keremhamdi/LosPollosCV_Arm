@@ -18,6 +18,12 @@ def candidate(x, y, score, size=(1280, 720)):
 
 
 class WristSelectionTests(unittest.TestCase):
+    def test_goto_exposes_reported_tilt_without_changing_the_command(self):
+        args=types.SimpleNamespace(arm_url='http://offline-test')
+        with patch.object(grab.requests,'post',return_value=Mock(json=lambda:{'ok':True,'tilt':35.})) as post:
+            self.assertEqual(grab.goto(args,1.,25.,14.),35.)
+        self.assertEqual(post.call_args.kwargs['json'],{'x':1.,'y':25.,'height':14.})
+
     def test_stale_wrist_frame_is_not_used_for_alignment(self):
         response = {'frames': {'hand': {'jpeg_base64':'not-decoded', 'receive_age_s':3.}}}
         with patch.object(grab.requests,'get',return_value=Mock(json=lambda:response)):
@@ -72,7 +78,7 @@ class WristSelectionTests(unittest.TestCase):
         with patch('os.path.exists',return_value=True), \
                 patch('builtins.open',mock_open(read_data=json.dumps(cal))), \
                 patch.object(grab.requests,'post',return_value=Mock()), \
-                patch.object(grab,'goto') as move, patch.object(grab,'save_hand_view'), \
+                patch.object(grab,'goto',return_value=25.) as move, patch.object(grab,'save_hand_view'), \
                 patch.object(grab,'find_in_hand',side_effect=[(p,img,None) for p in points]), \
                 redirect_stdout(io.StringIO()):
             xy = grab.hand_correct(args, text, 0.,25.,4.)
@@ -126,6 +132,7 @@ class WristSelectionTests(unittest.TestCase):
         self.assertTrue(args.wrist_alignment_used)
         self.assertEqual(move.call_count,1)
         self.assertEqual(len(args.wrist_report['observations']),2)
+        self.assertEqual([o['hover_tilt_deg'] for o in args.wrist_report['observations']],[25.,25.])
 
     def test_single_good_frame_followed_by_lost_cap_is_not_confirmed(self):
         xy,args,move = self.align([(620.,425.),None],text='small black cap')

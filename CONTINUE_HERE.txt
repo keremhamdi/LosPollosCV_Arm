@@ -9,12 +9,13 @@ tested improvements. Do not rebuild the robot application from an older branch.
 
 Repository: https://github.com/keremhamdi/LosPollosCV_Arm
 Branch: feel-grab-reachy
-Latest implementation commit at handoff: cc63f63
+Motion/result-behaviour checkpoint at the original handoff: cc63f63
   Full SHA: cc63f63c3e16d0bbb7f983e3bf9e5d9feb5ad341
   Title: Distinguish pickup holds from completed missed attempts
-This handoff is added in a subsequent documentation-only commit.
+Subsequent commits add this handoff, offline comparison and hover-tilt recording.
+Continue from the current branch HEAD; do not check out the checkpoint as a rollback.
 
-Expected pickup build: fine-centering-v3.1
+Expected pickup build: fine-centering-v3.2
 Expected controller build: descent-taper-v1
 Active entry point: grab_text.py
 Controller entry point: python3 -m arm.click (from controller/)
@@ -25,7 +26,7 @@ The Linux robot checkout is:
 Continue and push tested changes to feel-grab-reachy. The user has requested this
 branch explicitly. Inspect local changes before pulling or editing; preserve the
 friend's work. Do not reset or clean the working checkout to force an update.
-The newest reporting commit has not been independently confirmed running on the
+The newest build has not been independently confirmed running on the
 Linux arm. Check the printed builds and git revision first.
 
 IMPORTANT: LINUX_HANDOFF.md and the lower README sections describe a separate,
@@ -152,6 +153,9 @@ Descent and outcome:
   743e613 — Tighter cap/sideways centring with two-image confirmation and detailed
             wrist evidence. Upright/bottle acceptance preserved.
   cc63f63 — Distinguish holding from a completed but missed attempt in the terminal.
+  Later diagnostics — compare_grabs.py compares recorded attempts; debug ZIPs
+            include the comparison. Wrist traces now retain the hover tilt already
+            returned by the controller. This does not change move commands.
 
 Older failed experimental feel-stop-v2 behaviour required contact and could press
 the table or refuse closure. Do not bring it back as the default. This branch is
@@ -268,23 +272,33 @@ Useful files:
   pick_views/wrist_alignment.json        current alignment decisions and frame IDs
   config/local/grasp_runs/*.json         timestamped controller requests/results
 
+The ZIP also includes grasp_comparison.txt when two local reports are available.
+To print the comparison locally without SAM, cameras or a robot connection:
+  python3 -B compare_grabs.py
+To compare two collected ZIPs, pass their paths as the two positional arguments.
+With two ZIPs it uses the newest report from each; with one ZIP, its newest two.
+These are not automatically a labelled success/failure pair. Compare the source
+filenames with the observed attempts. Missing values remain unknown, and all
+position errors are model/encoder estimates, not physical measurements.
+
 Key source files:
   grab_text.py                          detection routing, height, wrist loop, output
   small_object_grasp.py                 profiles, pose/centre fitting, height decision
   controller/arm/reach.py               IK paths, compensation, descent and lift
   controller/arm/arm.py                 motor control and holding heuristics
   controller/arm/click.py               API routing and report persistence
+  compare_grabs.py                      offline run comparison; no robot I/O
 
 Offline test command from Linux repo root:
   .venv/bin/python -B -m unittest discover -q
 
-At cc63f63, 165 tests passed on the development Mac using its existing sibling
-venv. SAM outputs and hardware feedback are mocked; geometry simulations are
+The latest suite passes 174 tests on the development Mac using its existing sibling
+venv (the earlier cc63f63 checkpoint passed 165). SAM outputs and hardware feedback are mocked; geometry simulations are
 synthetic. No robot or live GPU inference was run by Codex there. Test results
 must not be described as physical grasp success or millimetre accuracy.
 Focused suites include test_wrist_selection.py, test_small_object_grasp.py,
 test_descent_taper.py, test_grab_camera_mode.py, test_grab_outcome.py and
-test_integration.py. Update tests to cover the observed failure, not just the
+test_integration.py and test_compare_grabs.py. Update tests to cover the observed failure, not just the
 chosen implementation. Check git diff --check before committing.
 
 10. SECONDARY INTEGRATION — NOT THE CURRENT BLOCKER
