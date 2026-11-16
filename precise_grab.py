@@ -423,15 +423,15 @@ def find_and_grab(a, text, tries=None):
     return grab_with_retries(a, t, lambda near: locate(a, text, near), tries)
 
 
-def find_hand(a, text, near, close_enough=None, tries=2):
+def find_hand(a, text, near, fits=None, tries=2):
     """The object's middle in the gripper camera's picture: ((u, v), picture, outline) or (None, picture, None).
 
-    Like grab_text.find_in_hand, but a match only counts if it can be the object: close_enough(centre)
-    says whether a blob is near enough to where the object must show. (A real run took something
+    Like grab_text.find_in_hand, but a match only counts if it can be the object: fits(centre, area)
+    says whether a blob is near enough to where the object must show, and about its size. (A real run took something
     710 px from the expected spot for the object; the whole correction was then thrown away. Here
     such a match is passed over and the object is looked for where it has to be.)"""
     import time
-    if close_enough is None:
+    if fits is None:
         return G.find_in_hand(a, text, near=near, tries=tries)
     ts.VLM_BACKEND = "none"
     near = np.asarray(near, float)
@@ -442,7 +442,7 @@ def find_hand(a, text, near, close_enough=None, tries=2):
 
     def nearest(cands):
         seen = [(float(np.linalg.norm(centre(c) - near)), c) for c in cands]
-        seen = [(d, c) for d, c in seen if close_enough(centre(c))]
+        seen = [(d, c) for d, c in seen if fits(centre(c), float(np.asarray(c["mask"]).sum()))]
         return min(seen, key=lambda dc: dc[0])[1] if seen else None
     img, passed_over = None, 0
     for attempt in range(tries):
@@ -470,15 +470,20 @@ def find_hand(a, text, near, close_enough=None, tries=2):
     if img is not None:
         # From straight above things look different (a standing cylinder is just a disc), so the name
         # may not match. Last try: any small object, the one nearest where it should be.
-        res = ts.decide(img, G.HAND_FALLBACK[0], G.HAND_FALLBACK[1])
+        seen = []
+        for prompt in HAND_FALLBACKS:                # any colour: "small white object" alone misses a black cap
+            seen += ts.decide(img, prompt, None)["candidates"]
         n_px = img.width * img.height
-        small = [c for c in res["candidates"] if 30 < np.asarray(c["mask"]).sum() < 0.03 * n_px]
+        small = [c for c in seen if 30 < np.asarray(c["mask"]).sum() < 0.03 * n_px]
         best = nearest(small)
         if best is not None:
             c = centre(best)
             print(f"  gripper camera: '{text}' not recognised from above; using the small object where it should be")
             return (float(c[0]), float(c[1])), img, best
     return None, img, None
+
+
+HAND_FALLBACKS = ("small object", "small round object", "object")
 
 
 class CantReach(RuntimeError):
@@ -641,7 +646,7 @@ def measure_lean(a, text, x, y, look, tilt, cal, centre):
             expect = _lean_geometry(cal, J, x, y, t, at)
             limit = max(60.0, 2.0 * float(np.linalg.norm(expect)))     # the same object: about where geometry says
             p, img, best = find_hand(a, text, p_at + expect,
-                                     lambda c, at=p_at + expect, limit=limit: np.linalg.norm(c - at) <= limit)
+                                     lambda c, area=None, at=p_at + expect, limit=limit: np.linalg.norm(c - at) <= limit)
             if p is None:
                 break                                        # out of the picture: far enough
             step = np.array(p) - p_at
@@ -670,8 +675,17 @@ def measure_lean(a, text, x, y, look, tilt, cal, centre):
 _told = set()
 
 
-def hand_align(a, text, x, y, obj_h=None):
+ALIGNED_CM = 0.15        # the gripper camera is done when a look shows the object this close to under the jaws
+ALIGN_LOOKS = 6          # ... or after this many looks
+
+
+def save_view(*args):
+    return G.save_hand_view(*args)
+
+
+def hand_align(a, text, x, y, obj_h=None, width=None):
     """Hover above (x, y), look with the gripper camera, shift until the object is where the jaws close.
+    `width`: how wide the fixed camera found the object (cm); a blob of quite another size isn't it.
     Returns (x, y, info): the corrected aim (or the same if the gripper camera can't help), and
     info = {"used": the aim comes from the gripper camera, "lean_aware": its setup knows the lean}."""
     import json
@@ -710,9 +724,17 @@ def hand_align(a, text, x, y, obj_h=None):
         if np.linalg.norm(shift) > 1 and "lean" not in _told:
             _told.add("lean")
             print(f"  gripper camera: leaning {tilt:g} deg here ({cal_tilt:g} in its setup), allowed for")
-        def close_enough(c):    # the fixed camera put the arm within a few cm: further off, it's something else
-            return np.hypot(*np.linalg.solve(J, target - c)) <= G.MAX_FIX_CM
-        p, img, best = find_hand(a, text, target, close_enough, tries)
+        per_cm = float(np.sqrt(abs(np.linalg.det(J))))       # pixels per cm in this picture
+
+        def fits(c, area=None):
+            # the fixed camera put the arm within a few cm: further off, it's something else ...
+            if np.hypot(*np.linalg.solve(J, target - c)) > G.MAX_FIX_CM:
+                return False
+            if area is None or not width or per_cm <= 0:
+                return True
+            across = 2.0 * np.sqrt(area / np.pi) / per_cm     # ... and so is a blob of quite another size
+            return 0.4 * width <= across <= 2.5 * width + 1.0   # (a glint on the table, the plate next to it)
+        p, img, best = find_hand(a, text, target, fits, tries)
         return p, img, best, target, J
 
     # 1. find it: look straight above the fixed camera's aim; if it isn't in view, look around it
@@ -735,10 +757,10 @@ def hand_align(a, text, x, y, obj_h=None):
         print("  gripper camera: couldn't find it, keeping the fixed camera's aim "
               "(last picture: pick_views/hand_latest_0.jpg)")
         return x0, y0, info
-    # 2. perfect it: shift until it sits where the jaws close (up to 3 looks)
+    # 2. perfect it: move, look again, until a look itself shows the object where the jaws close
     x, y, p, img, best, target, J = found
     last = None
-    for step in range(3):
+    for step in range(ALIGN_LOOKS):
         if step:
             p, img, best, target, J = look_at(x, y, 2)
             if p is None:
@@ -746,19 +768,23 @@ def hand_align(a, text, x, y, obj_h=None):
                 info["used"] = True
                 return x, y, info
         d = np.linalg.solve(J, target - np.array(p))       # how far to move (cm) to bring it under the jaws
-        print(f"  gripper camera: off by {np.hypot(*d):.1f} cm ({np.hypot(*(target - np.array(p))):.0f} px)")
-        G.save_hand_view(img, best, p, target, step)
-        if last is not None and np.hypot(*d) > last + 0.3:
+        off = float(np.hypot(*d))
+        print(f"  gripper camera: off by {off:.2f} cm ({np.hypot(*(target - np.array(p))):.0f} px)")
+        save_view(img, best, p, target, step)
+        if off <= ALIGNED_CM:                              # seen in place, not just assumed after a move
+            print(f"  gripper camera: aligned to within {ALIGNED_CM} cm")
+            break
+        if last is not None and off > last + 0.3:
             print("  gripper camera: getting worse, not trusting it, keeping the fixed camera's aim")
             return x0, y0, info
-        last = np.hypot(*d)
+        last = off
         nx, ny = x + d[0], y + d[1]
         if np.hypot(nx - x0, ny - y0) > G.MAX_FIX_CM:
             print(f"  gripper camera wants more than {G.MAX_FIX_CM} cm from the fixed camera's aim: not trusting it")
             return x0, y0, info
         x, y = nx, ny
-        if np.hypot(*d) < 0.3:
-            break
+    else:
+        print(f"  gripper camera: still {off:.2f} cm off at the last look; that correction is applied too")
     info["used"] = True
     print(f"  gripper camera: aim moved by {np.hypot(x - x0, y - y0):.1f} cm in total")
     return x, y, info
@@ -945,7 +971,7 @@ def grab_target(a, t, descent=None):
         hand = {"used": False, "lean_aware": False}
         if not a.no_hand:
             try:
-                gx, gy, hand = hand_align(a, t["hand_text"], gx, gy, look_h)
+                gx, gy, hand = hand_align(a, t["hand_text"], gx, gy, look_h, t["width"])
             except (RuntimeError, ValueError, KeyError, requests.RequestException, np.linalg.LinAlgError) as e:
                 print(f"  gripper camera skipped: {e}")
         # How far beyond that aim to go (cm out from the base, cm to its left), in this order of trust:

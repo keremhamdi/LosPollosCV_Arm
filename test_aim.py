@@ -199,12 +199,13 @@ class HandCameraTests(unittest.TestCase):
             return sim.Reply(self.world.goto(json["x"], json["y"], json["height"], json.get("tilt"))
                              if name == "goto" else {"ok": True})
 
-        def find(a, text, near=None, close_enough=None, tries=3):
+        def find(a, text, near=None, fits=None, tries=3):
             p = self.world.pixel() if self.sees else None
-            if p is None or (close_enough is not None and not close_enough(np.array(p))):
+            if p is None or (fits is not None and not fits(np.array(p))):
                 return None, "picture", None
             return (p[0] + self.rng.normal(0, 0.7), p[1] + self.rng.normal(0, 0.7)), "picture", {"mask": None}
 
+        self.real_find = P.find_hand
         answers = itertools.cycle(["", "3", ""])             # jaws around it; 3 cm tall; arm may move
         for target, name, value in ((G, "HAND_FILE", os.path.join(folder.name, "hand.json")),
                                     (G.requests, "post", post), (G, "find_in_hand", find), (P, "find_hand", find),
@@ -291,6 +292,30 @@ class HandCameraTests(unittest.TestCase):
         self.world.moves.clear()
         self.assertEqual(P.hand_align(self.a, "thing", 5.0, 25.0, 3.0), (5.0, 25.0, {"used": False, "lean_aware": False}))
         self.assertEqual(self.world.moves, [])
+
+    def test_it_keeps_looking_until_a_look_shows_the_object_under_the_jaws(self):
+        self.setup()
+        self.world.obj = np.array((-8.0, 16.0, 3.0))
+        x, y, info = P.hand_align(self.a, "thing", -6.0, 14.5, 3.0)
+        self.assertLess(np.hypot(x + 8.0, y - 16.0), 0.2)
+        self.assertIn("aligned to within 0.15 cm", sys.stdout.getvalue())
+        last = [line for line in sys.stdout.getvalue().splitlines() if "off by" in line][-1]
+        self.assertLessEqual(float(last.split("off by ")[1].split(" cm")[0]), 0.15)   # the last look confirmed it
+
+    def test_a_blob_of_quite_another_size_is_not_the_object(self):
+        seen = []
+
+        def decide(img, text, category):
+            mask = np.zeros((720, 1280), bool)
+            mask[330:342, 620:632] = True                    # a 12 px glint right where the object should be
+            seen.append(text)
+            return {"candidates": [{"mask": mask, "target_score": 0.9}]}
+        fits_cap = lambda c, area=None: area is None or area > 500     # a 1.8 cm cap is far bigger than that
+        with patch.object(G.ts, "decide", decide), patch("time.sleep", lambda s: None), \
+                patch.object(G, "hand_frame", lambda a: Image.new("RGB", (1280, 720))):
+            p, _, best = self.real_find(self.a, "black cap", (626, 336), fits_cap, 1)
+        self.assertIsNone(p)
+        self.assertIn("small object", seen)                  # it also looked for any small object, of any colour
 
     def test_something_far_from_where_the_object_must_be_is_not_taken_for_it(self):
         self.setup()
@@ -574,7 +599,7 @@ class GrabFlowTests(unittest.TestCase):
                                    ({"used": True, "lean_aware": True}, -0.5, -0.5)):
             self.table.posts.clear()
             self.a.reach_out, self.a.no_hand = asked, False
-            with patch.object(P, "hand_align", lambda a, text, x, y, h, hand=hand: (x, y, hand)):
+            with patch.object(P, "hand_align", lambda a, text, x, y, h, w=None, hand=hand: (x, y, hand)):
                 P.grab_target(self.a, target)
             body = self.table.posts[-1][1]
             moved = np.hypot(body["x"], body["y"] - 4.2) - np.hypot(target["x"], target["y"] - 4.2)
@@ -658,9 +683,20 @@ class CommandLineTests(unittest.TestCase):
 
     def run_main(self, *flags):
         with patch.object(G, "find_and_grab") as usual, patch.object(P, "find_and_grab") as careful, \
-                contextlib.redirect_stdout(io.StringIO()) as said:
+                patch.object(G, "HAND_FILE", self.hand_file), contextlib.redirect_stdout(io.StringIO()) as said:
             G.main(["--text", "bottle cap", *flags])
         return usual, careful, said.getvalue()
+
+    hand_file = "no/such/hand.json"
+
+    def test_the_gripper_camera_is_used_whenever_it_is_set_up(self):
+        self.hand_file = __file__                            # any file that exists: it has been set up
+        self.assertFalse(self.run_main()[1].call_args.args[0].no_hand)
+        self.assertTrue(self.run_main("--no-hand")[1].call_args.args[0].no_hand)
+        self.assertTrue(self.run_main("--basic")[0].call_args.args[0].no_hand)        # the basic pickup stays as it was
+        self.hand_file = "no/such/hand.json"
+        self.assertTrue(self.run_main()[1].call_args.args[0].no_hand)
+        self.assertFalse(self.run_main("--hand")[1].call_args.args[0].no_hand)
 
     def test_basic_is_the_pickup_as_it_was(self):
         usual, careful, said = self.run_main("--basic")
