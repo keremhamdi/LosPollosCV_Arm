@@ -442,6 +442,8 @@ def main(argv=None):
     ap.add_argument("--min-close", type=float, default=0.8, metavar="CM",
                     help="small and flat things may be closed on this low above the table "
                          "(default 0.8; 1.5 = the basic pickup's lowest)")
+    ap.add_argument("--feel-small", action="store_true",
+                    help="use the arm's contact stop for small objects too (it then backs up a little before closing)")
     a = ap.parse_args(argv)
     print('Pickup guidance: ' + ('standing camera only; wrist alignment OFF' if a.no_hand else
                                 'standing camera + wrist alignment ON'))

@@ -383,10 +383,23 @@ class GrabFlowTests(unittest.TestCase):
         self.assertEqual(self.table.names(), ["grab"])
         body = self.table.posts[0][1]
         self.assertLess(np.hypot(body["x"] - 4, body["y"] - 30), 0.3)
-        self.assertEqual((body["guard"], body["method"], body["height"]), (True, "top", 0.8))
+        self.assertEqual((body["method"], body["height"]), ("top", 0.8))
+        self.assertNotIn("guard", body)                      # small: no contact stop, so no backing up before closing
         self.assertNotIn("feel_all_the_way", body)           # never a search below the table
         self.assertAlmostEqual(body["object_height"], 1.5, delta=0.5)
         self.assertNotIn("u", body)
+
+    def test_a_small_thing_missed_without_touching_is_tried_lower_and_big_things_keep_the_contact_stop(self):
+        self.table.miss_first = 1
+        self.table.miss_report = {"jaws_gap_cm": 0.0}        # what the arm reports without its contact stop
+        P.find_and_grab(self.a, "bottle cap")
+        first, second = (body for name, body in self.table.posts if name == "grab")
+        self.assertEqual((first["height"], second["height"], "guard" in second), (0.8, 0.5, False))
+        tall = P.locate(self.a, "bottle cap")
+        tall["height"] = 9.0
+        self.table.posts.clear()
+        P.grab_target(self.a, tall)
+        self.assertTrue(self.table.posts[-1][1]["guard"])
 
     def test_closing_height_is_the_usual_plan_except_lower_for_small_and_flat_things(self):
         plan = lambda h, flat=False, **o: P.grab_heights(P.options(**o), h, flat)
@@ -412,7 +425,7 @@ class GrabFlowTests(unittest.TestCase):
         self.assertIn("Looking again (try 2 of 2)", sys.stdout.getvalue())
 
     def test_after_a_stop_in_the_air_the_second_try_goes_down_without_the_contact_stop(self):
-        self.table.miss_first = 1
+        self.table.miss_first, self.a.feel_small = 1, True
         self.table.miss_report = {"contact": True, "met_at_cm": 5.2, "jaws_gap_cm": 0.0}   # the cap is 1.5 cm tall
         res = P.find_and_grab(self.a, "bottle cap")
         self.assertTrue(res["holding"])
@@ -423,7 +436,7 @@ class GrabFlowTests(unittest.TestCase):
         self.assertIn("above the object", sys.stdout.getvalue())
 
     def test_after_closing_on_nothing_without_touching_anything_the_second_try_goes_lower(self):
-        self.table.miss_first = 1
+        self.table.miss_first, self.a.feel_small = 1, True
         self.table.miss_report = {"contact": False, "closed_at_cm": 0.8, "jaws_gap_cm": 0.0}
         P.find_and_grab(self.a, "bottle cap")
         first, second = (body for name, body in self.table.posts if name == "grab")
@@ -658,7 +671,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.table.names(), ["grab", "place", "park"])
         grab = self.table.posts[0][1]
         self.assertLess(np.hypot(grab["x"] + 6, grab["y"] - 22), 0.4)
-        self.assertEqual((grab["guard"], "feel_all_the_way" in grab), (True, False))
+        self.assertEqual(("guard" in grab, "feel_all_the_way" in grab), (False, False))    # small: no contact stop
         self.assertAlmostEqual(grab["height"], 2.5, delta=0.3)                          # half its 5 cm, not the fixed 5 cm
         self.assertEqual(self.table.posts[1][1]["x"], -20.)
         self.assertIn("looks_like:small bottle at x=-6", out["detect_detail"])

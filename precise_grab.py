@@ -47,7 +47,7 @@ def options(**settings):
     """Settings for the functions here, as the command line would give them (for other programs)."""
     base = dict(arm_url="http://localhost:8890", close=None, above=14.0, side=False, no_hand=True,
                 reach_out=None, tries=2, no_lens=False, no_zoom=False, no_feel=False, dry=False,
-                min_close=LOW_CLOSE_CM, put_height=5.0, bring=None)
+                min_close=LOW_CLOSE_CM, feel_small=False, put_height=5.0, bring=None)
     base.update(settings)
     return argparse.Namespace(**base)
 
@@ -344,7 +344,8 @@ def next_descent(res, t):
     top = t["height"] if t["height"] else (FLAT_LOOK_CM if t["flat"] else None)
     if rep.get("contact") and met is not None and top is not None and met > top + IN_THE_AIR_CM:
         return {"stop": False, "close": None, "reach": None}
-    if rep.get("contact") is False and closed is not None:
+    untouched = rep.get("contact") is False or ("contact" not in rep and res.get("stop") is False)
+    if untouched and closed is not None and not rep.get("slipped"):
         return {"stop": True, "close": max(FLOOR_CLOSE_CM, round(0.5 * closed, 1)), "reach": None}
     other = None
     if res.get("reach") is not None and not rep.get("slipped") and landed_on_it(rep, t):
@@ -858,6 +859,7 @@ def why_missed(rep, t, close=None):
     return "the jaws closed on nothing"
 
 
+SMALL_OBJECT_CM = 6.0    # as in the arm's reach.py: under this (or height unknown) it handles the object as small
 IN_THE_AIR_CM = 1.5      # stopping this far above the object's top: nothing was there, a false touch
 
 
@@ -877,7 +879,14 @@ def grab_target(a, t, descent=None):
     out = {"ok": True, "holding": False, "why": "", "report": {}, "error": None, "above": above, "close": close,
            "reach": None}    # "reach": the guessed extra reach used, when nothing better was known
     print(f"Found {t['what']} (score {t['score']:.2f}): {describe(t)}, standing at table x={t['x']:.1f}, y={t['y']:.1f} cm")
-    stop = not a.side and not a.no_feel and descent.get("stop", True)
+    # Small things go down without the arm's contact stop. With it, the arm ends the descent by
+    # backing off and pulling itself up to the exact planned height, which lifts the jaws off a small
+    # object just before they close (seen on the arm). Without it the arm's own small-object descent
+    # runs: no pull-up, ending a little low. --feel-small keeps the contact stop.
+    small = not h or h < SMALL_OBJECT_CM
+    stop = (not a.side and not a.no_feel and descent.get("stop", True)
+            and (not small or getattr(a, "feel_small", False)))
+    out["stop"] = stop
     print(f"Planned closing height: {close:g} cm above the calibrated table; approach {above:g} cm; "
           + ("the arm's contact stop can end the descent earlier." if stop else "no contact stop on this descent."))
     if a.dry:
