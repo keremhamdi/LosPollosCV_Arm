@@ -466,10 +466,9 @@ def main(argv=None):
         # put/bring: let go at the height it was gripped at (gentle), unless --put-height says otherwise
         a.put_height_given = any(str(g) == "--put-height" or str(g).startswith("--put-height=") for g in given)
         place = precise_grab.put_down
-        if not any(str(g) in ("--hand", "--no-hand") for g in given):
-            import os
-            a.no_hand = not os.path.exists(HAND_FILE)     # the gripper camera centres the jaws whenever it is set up
-        print("Gripper camera alignment: " + ("OFF" if a.no_hand else "ON (to within 0.15 cm; --no-hand turns it off)"))
+        # The gripper camera is only used with --hand. Switched on by default it made picks that worked
+        # with the fixed camera alone (small bottle, white cylinder) fail on the arm.
+        print("Gripper camera alignment: " + ("OFF (--hand turns it on)" if a.no_hand else "ON (to within 0.15 cm)"))
         print("Careful aim ON (--basic turns it off): middle of where the object stands, second look at small "
               f"things, up to {max(1, a.tries)} grabs" + ("" if a.reach_out is None else f", reach-out {a.reach_out:g} cm"))
     else:

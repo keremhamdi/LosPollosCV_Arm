@@ -332,7 +332,7 @@ def main():
     ap.add_argument("--basic", action="store_true",
                     help="pick as before this branch: closing at --close (5 cm), one grab. The options below then do nothing")
     ap.add_argument("--precise", action="store_true", help="(on by default on this branch; kept so old commands work)")
-    ap.add_argument("--hand", action="store_true", help="centre the jaws with the gripper camera (default if it is set up)")
+    ap.add_argument("--hand", action="store_true", help="centre the jaws with the gripper camera (off by default)")
     ap.add_argument("--no-hand", action="store_true", help="never use the gripper camera")
     ap.add_argument("--tries", type=int, default=2, help="grabs per request (default 2)")
     ap.add_argument("--no-feel", action="store_true", help="no contact stop on the way down")
@@ -352,9 +352,7 @@ def main():
         ap.error("camera/arm packages are missing: pip install -r requirements.txt (or use --listen-only)")
     a.meds = load_meds(a.meds)
     a.precise = not a.basic
-    if a.precise and G is not None and not a.no_hand:
-        import os
-        a.hand = a.hand or os.path.exists(G.HAND_FILE)    # the gripper camera centres the jaws whenever it is set up
+    a.hand = a.hand and not a.no_hand                    # the gripper camera only with --hand
     a.precise_close = a.close                 # the closing height is planned from the object unless --close is given
     if a.close is None:
         a.close = 5.0

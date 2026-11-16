@@ -724,14 +724,11 @@ class CommandLineTests(unittest.TestCase):
 
     hand_file = "no/such/hand.json"
 
-    def test_the_gripper_camera_is_used_whenever_it_is_set_up(self):
-        self.hand_file = __file__                            # any file that exists: it has been set up
-        self.assertFalse(self.run_main()[1].call_args.args[0].no_hand)
-        self.assertTrue(self.run_main("--no-hand")[1].call_args.args[0].no_hand)
-        self.assertTrue(self.run_main("--basic")[0].call_args.args[0].no_hand)        # the basic pickup stays as it was
-        self.hand_file = "no/such/hand.json"
+    def test_the_gripper_camera_is_only_used_when_asked_for(self):
+        self.hand_file = __file__                            # even when it has been set up
         self.assertTrue(self.run_main()[1].call_args.args[0].no_hand)
         self.assertFalse(self.run_main("--hand")[1].call_args.args[0].no_hand)
+        self.assertTrue(self.run_main("--basic")[0].call_args.args[0].no_hand)
 
     def test_basic_is_the_pickup_as_it_was(self):
         usual, careful, said = self.run_main("--basic")
