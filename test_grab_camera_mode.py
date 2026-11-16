@@ -41,7 +41,7 @@ class CameraModeTests(unittest.TestCase):
             grab.go(args, Image.new('RGB', (1280,720)), 500,500,'test',.8,close=close,above=14)
         return calls
 
-    def test_normal_pick_never_calls_wrist_and_keeps_original_grab_fields(self):
+    def test_normal_pick_never_calls_wrist_and_honours_planned_height(self):
         args = self.arguments()
         with patch.object(grab, 'hand_correct', side_effect=AssertionError('Wrist guidance forbidden')), \
                 patch.object(grab, 'find_in_hand', side_effect=AssertionError('Wrist SAM forbidden')), \
@@ -49,7 +49,7 @@ class CameraModeTests(unittest.TestCase):
             calls = self.perform_pick(args)
         self.assertEqual([url.rsplit('/',1)[1] for url,_ in calls], ['click','grab'])
         self.assertEqual(calls[-1][1], {'size':1280,'height':1.5,'above':14,'method':'top',
-                                      'guard':True,'feel_all_the_way':True,'x':0.,'y':26.})
+                                      'guard':True,'x':0.,'y':26.})
 
     def test_opt_in_reaches_existing_wrist_path(self):
         args = self.arguments('--hand')
@@ -63,6 +63,14 @@ class CameraModeTests(unittest.TestCase):
         self.assertTrue(calls[-1][1]['guard'])
         self.assertEqual(calls[-1][1]['height'],1.)
         self.assertNotIn('feel_all_the_way',calls[-1][1])
+
+    def test_planned_height_still_adapts_to_estimate_and_marks_unknown_fallback(self):
+        args = self.arguments()
+        for estimate, expected in (((2.,1.,None),1.5), ((10.,3.,None),5.), (None,1.5)):
+            with self.subTest(estimate=estimate), patch.object(grab, 'estimate_height', return_value=estimate):
+                close, above, _ = grab.grab_heights(args, None, (1280,720))
+            self.assertEqual(close,expected)
+            self.assertGreater(above,close)
 
 
 if __name__ == '__main__':

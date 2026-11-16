@@ -13,6 +13,7 @@
   .venv/bin/python grab_text.py --text "small bottle"     # one grab, then exit
   add --dry to only show what it found and where, without moving
   standing-camera guidance is the default; add --hand to enable wrist-camera corrections
+  descent honours the planned closing height, with the existing contact stop as a backup
 
 Needs the arm page running WITHOUT --read-only, follower (Self-controlled), Hold arm pressed.
 The page's buttons keep working at the same time. Reading writing needs once: uv pip install easyocr
@@ -698,19 +699,19 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None):
     close = close if close is not None else (a.close if a.close is not None else 3.0)
     above = above if above is not None else a.above
     h, width, center = est if est else (None, None, None)
-    kind = ("small: ends a little low going down" if h < 6 else "big: holds the exact height going down") if h else "size unknown: treated as small"
-    print((f"About {h:.1f} cm tall ({kind}): " if h else f"({kind}) ") + f"closing the jaws {close} cm above the table, coming from {above} cm")
+    source = 'manual override' if a.close is not None else ('height estimate' if h else 'fallback; object height unknown')
+    print(f"Planned closing height: {close:g} cm above the calibrated table ({source}); approach {above:g} cm.")
+    if not a.side and not a.no_feel:
+        print('Descent limit: planned closing height; the existing contact stop can stop it earlier.')
     if a.dry:
         return
     body = {"u": u, "v": v, "size": img.width, "height": close, "above": above,
             "method": "side" if a.side else "top"}
     if not a.side and not a.no_feel:
-        # Go down slowly at the end and stop at the first thing the gripper meets: the table under the
-        # fingertips (small things) or the object's top under the palm (tall things). So neither the
-        # table's exact height nor the object's estimated height has to be right any more.
+        # Keep the friend's guarded descent, but honour the height already
+        # computed above. feel_all_the_way would discard it and search below
+        # the table even when the client has a planned closing point.
         body["guard"] = True
-        if a.close is None:
-            body["feel_all_the_way"] = True
     if not a.side and where.get("x") is not None:
         gx, gy = float(where["x"]), float(where["y"])
         if not a.no_hand:
@@ -736,9 +737,10 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None):
     r = requests.post(a.arm_url + "/api/grab", json=body, timeout=240).json()
     rep = r.get("report") or {}
     if rep.get("contact"):
-        print(f"  felt something {rep['met_at_cm']} cm above where the table was thought to be, closed there")
+        print(f"  contact stop at model height {rep['met_at_cm']} cm; after backoff {rep['closed_at_cm']} cm")
     elif "contact" in rep:
-        print("  went all the way down without feeling anything")
+        print(f"  descent ended at model height {rep.get('closed_at_cm', '?')} cm "
+              f"(planned {close:g} cm), without an early contact stop")
     if rep.get("jaws_gap_cm") is not None:
         print(f"  jaws closed to {rep['jaws_gap_cm']} cm")
     if rep.get("slipped"):

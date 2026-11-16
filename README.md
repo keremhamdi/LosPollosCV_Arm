@@ -3,7 +3,9 @@
 **Active branch: `feel-grab-reachy`.** The arm's motion/controller files have been
 restored to the friend's commit `a8ccb74` after the `feel-stop-v2` change failed
 on the physical arm. `grab_text.py` now uses standing-camera guidance by default;
-wrist alignment requires `--hand`. See [current status and test commands](docs/GRASP_ACCURACY.md).
+wrist alignment requires `--hand`. Pickup honours its planned closing height
+instead of automatically searching below the table. See
+[current status and test commands](docs/GRASP_ACCURACY.md).
 
 Text-prompted object detection, segmentation and grasp proposals for an ElRobot
 with **two continuously connected cameras: one fixed standing camera and one
