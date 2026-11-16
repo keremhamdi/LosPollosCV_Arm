@@ -29,7 +29,7 @@ from PIL import Image
 import target_selector_v5 as ts
 import small_object_grasp as small_grasp
 
-PICKUP_BUILD = 'fine-centering-v3.2'
+PICKUP_BUILD = 'demo-centering-v3.3'
 
 
 def base_pixel(mask):
@@ -493,6 +493,8 @@ def main(argv=None):
     wrist.add_argument("--no-hand", dest="no_hand", action="store_true",
                        help="use standing-camera guidance only")
     ap.set_defaults(no_hand=False)
+    ap.add_argument('--demo', action='store_true',
+                    help='allow up to 4 cm wrist correction in 0.5 cm steps; only descend after confirmed wrist alignment')
     ap.add_argument("--reach-out", type=float, default=None, metavar="CM",
                     help="aim this many cm further from the base than measured, because the arm tends to "
                          "stop short (default 0 for named small-object profiles, 1 otherwise)")
@@ -500,11 +502,15 @@ def main(argv=None):
                     help="don't feel for the table on the way down (the old way: trust the table's height)")
     ap.add_argument("--dry", action="store_true", help="find things and say where, never move")
     a = ap.parse_args(argv)
+    if a.demo and (a.no_hand or a.side):
+        ap.error('--demo requires wrist guidance and the normal top pickup')
     if a.object_height is not None and (not np.isfinite(a.object_height) or a.object_height <= .5):
         ap.error('--object-height must exceed 0.5 cm; shorter objects need a validated lower fingertip clearance')
     print('Pickup build: ' + PICKUP_BUILD)
     print('Pickup guidance: ' + ('standing camera only; wrist alignment OFF' if a.no_hand else
                                 'standing camera + wrist alignment ON'))
+    if a.demo:
+        print('DEMO MODE: extra bounded wrist corrections; no pickup from an unconfirmed standing-camera fallback.')
 
     if a.text or a.word:
         return find_and_grab(a, a.text or a.word)
@@ -740,8 +746,9 @@ def _hand_correct(a, text, x, y, obj_h, fine):
     import json
     import os
     profile = small_grasp.profile_for(text)
-    max_fix = 2. if profile else MAX_FIX_CM
-    max_step = .5 if profile else 2.
+    demo = getattr(a,'demo',False)
+    max_fix = 4. if demo else (2. if profile else MAX_FIX_CM)
+    max_step = .5 if demo or profile else 2.
     report = a.wrist_report
     def finish(status, fx, fy):
         report.update(status=status, final_xy_cm=[float(fx),float(fy)],
@@ -793,7 +800,7 @@ def _hand_correct(a, text, x, y, obj_h, fine):
     # 2. Small corrections, with a new matching observation after every move.
     x, y, p, img, best = found
     track_near = target
-    max_looks = 8 if fine else 5
+    max_looks = 12 if demo else (8 if fine else 5)
     tolerance = report['tolerance_cm']
     confirm_p = None
     move_needed = True
@@ -975,6 +982,11 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None, aim=None):
             body['wrist_alignment_used'] = a.wrist_alignment_used
         body.pop("u"); body.pop("v")
         body["x"], body["y"] = round(gx, 2), round(gy, 2)
+    if getattr(a,'demo',False) and not getattr(a,'wrist_alignment_used',False):
+        reason = (getattr(a,'wrist_report',None) or {}).get('status','wrist unavailable')
+        print(f'DEMO PAUSED: wrist alignment not confirmed ({reason}). No descent or closing commanded. '
+              'Keep the object isolated near the middle of the table and retry.')
+        return
     # A range midpoint is useful for wrist hover, but is not an object-height
     # measurement. Only publish a single height when the source supports it.
     object_h = decision['object_height_cm'] if decision else h

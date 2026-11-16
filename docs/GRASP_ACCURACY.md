@@ -1,9 +1,18 @@
 # Current pickup: automatic small-object profiles and both cameras
 
-Branch: `feel-grab-reachy`. Pickup build: **`fine-centering-v3.2`**.
+Branch: `feel-grab-reachy`. Pickup build: **`demo-centering-v3.3`**.
 Running controller build: **`descent-taper-v1`**.
 Both standing and wrist guidance are enabled by default in `grab_text.py`.
 Use `--no-hand` only for an explicit standing-only comparison.
+
+Optional demo command: `.venv/bin/python -u -B grab_text.py --hand --demo`.
+Demo mode allows up to 4 cm total wrist correction in 0.5 cm steps, with at most
+12 observations. It retains local target matching, the worsening-error check,
+the existing alignment tolerances, and guarded descent. Unconfirmed wrist
+alignment pauses the pickup before descent/closure instead of submitting the
+standing-camera fallback. This mode requires wrist guidance and normal top pickup.
+It can recover a correction rejected by the normal 2 cm small-object limit;
+it does not establish that the saved jaw-target calibration is physically correct.
 
 ## What changed
 
@@ -86,7 +95,7 @@ and 2.0 cm produced motor-target heights of 1.529, 2.696 and 1.990 cm. These are
 software checks, **not measured physical accuracy**. Real load, calibration and
 motor response still need a physical test.
 
-The offline suite passes **174 tests**, covering descent reference continuity,
+The offline suite passes **179 tests**, covering descent reference continuity,
 endpoint compensation, speed bounds, contact backoff, partial-path labelling,
 default camera mode, distant wrist detections, local crop coordinates, stale
 frames, target loss, correction limits, close/lift without contact, and report
@@ -142,7 +151,7 @@ cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
 
 Type `small white cylinder` at `What now?`, whether it is upright or sideways.
 On another attempt type `small black cap`. No `--close` or `--object-height`
-is needed. Startup should print `Pickup build: fine-centering-v3.2` and
+is needed. Startup should print `Pickup build: demo-centering-v3.3` and
 `standing camera + wrist alignment ON`; each request should print
 `Controller build: descent-taper-v1`, `Automatic profile: ...; closing at ... cm`
 and `Height decision: ...` explaining the chosen height or fallback.

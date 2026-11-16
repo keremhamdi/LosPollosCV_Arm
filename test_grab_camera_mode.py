@@ -29,6 +29,29 @@ class CameraModeTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             grab.main(['--text', 'test', '--hand', '--no-hand'])
 
+    def test_demo_requires_wrist_and_normal_pickup(self):
+        self.assertTrue(self.arguments('--demo').demo)
+        for flag in ('--no-hand','--side'):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                grab.main(['--demo',flag,'--text','small black cap'])
+
+    def test_demo_does_not_grab_after_wrist_fallback(self):
+        args=self.arguments('--demo')
+        with patch.object(grab,'hand_correct',return_value=(0.,25.)):
+            calls=self.perform_pick(args)
+        self.assertEqual([url.rsplit('/',1)[1] for url,_ in calls],['click'])
+
+    def test_demo_sends_confirmed_xy_without_extra_offset(self):
+        args=self.arguments('--demo')
+        def aligned(a,*unused):
+            a.wrist_alignment_used=True
+            return 1.5,25.
+        with patch.object(grab,'hand_correct',side_effect=aligned):
+            calls=self.perform_pick(args)
+        self.assertEqual([url.rsplit('/',1)[1] for url,_ in calls],['click','grab'])
+        self.assertEqual((calls[-1][1]['x'],calls[-1][1]['y']),(1.5,25.))
+        self.assertTrue(calls[-1][1]['guard'])
+
     def perform_pick(self, args):
         calls = []
         def post(url, json, **kwargs):

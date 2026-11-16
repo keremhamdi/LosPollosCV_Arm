@@ -4,8 +4,14 @@ Continuing this project with another LLM? Read or paste
 [CONTINUE_HERE.txt](CONTINUE_HERE.txt): branch, working behaviour, unresolved
 sideways-cylinder/cap centring, evidence, and Linux commands.
 
-**Active branch: `feel-grab-reachy`. Pickup build: `fine-centering-v3.2`.
+**Active branch: `feel-grab-reachy`. Pickup build: `demo-centering-v3.3`.
 Controller build: `descent-taper-v1`.**
+For the time-limited demo, run `grab_text.py --hand --demo`. This opt-in mode
+allows up to 4 cm wrist correction in 0.5 cm steps and at most 12 observations.
+It requires confirmed wrist alignment before descending, instead of picking
+from an unconfirmed standing-camera fallback. Normal mode remains available.
+It cannot correct a systematically wrong jaw-target calibration and has only
+been tested offline. Put one object in the central calibrated area for the demo.
 The friend's pickup flow now tapers hover compensation to zero during descent,
 keeps the planned closing height, and uses standing + wrist guidance by default.
 Wrist matching excludes distant detections and verifies each small correction.

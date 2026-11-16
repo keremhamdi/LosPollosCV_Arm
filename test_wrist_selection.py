@@ -70,8 +70,8 @@ class WristSelectionTests(unittest.TestCase):
         self.assertEqual(best['mask'].shape, (720,1280))
         self.assertEqual(detect.call_args_list[1].args[0].size, (640,615))
 
-    def align(self, points, text='small bottle', decision=None):
-        args = types.SimpleNamespace(no_hand=False, arm_url='http://offline-test',height_decision=decision)
+    def align(self, points, text='small bottle', decision=None, demo=False):
+        args = types.SimpleNamespace(no_hand=False, arm_url='http://offline-test',height_decision=decision,demo=demo)
         cal = {'target_px': [620.,425.], 'px_per_cm': [[17.25,0.],[0.,17.25]],
                'at': [0.,25.], 'look_above': 13.}
         img = Image.new('RGB',(1280,720))
@@ -114,6 +114,20 @@ class WristSelectionTests(unittest.TestCase):
         xy,args,move = self.align([(568.25,425.)],text='small black cap')
         self.assertEqual(xy,(0.,25.))
         self.assertFalse(args.wrist_alignment_used)
+        self.assertEqual(move.call_count,1)
+
+    def test_demo_can_finish_three_centimetre_correction_in_half_centimetre_steps(self):
+        points=[(620.-17.25*d,425.) for d in (3.,2.5,2.,1.5,1.,.5,0.,0.)]
+        xy,args,move=self.align(points,text='small black cap',demo=True)
+        self.assertEqual(xy,(3.,25.))
+        self.assertTrue(args.wrist_alignment_used)
+        self.assertEqual([c.args[1] for c in move.call_args_list],[0.,.5,1.,1.5,2.,2.5,3.])
+        self.assertEqual(args.wrist_report['max_correction_cm'],4.)
+
+    def test_demo_still_rejects_large_wrong_region_suggestion(self):
+        xy,args,move=self.align([(620.-17.25*5,425.)],text='small black cap',demo=True)
+        self.assertFalse(args.wrist_alignment_used)
+        self.assertEqual(args.wrist_report['status'],'correction_too_large')
         self.assertEqual(move.call_count,1)
 
     def test_fine_cap_corrects_offset_old_threshold_accepted(self):

@@ -15,8 +15,13 @@ Motion/result-behaviour checkpoint at the original handoff: cc63f63
 Subsequent commits add this handoff, offline comparison and hover-tilt recording.
 Continue from the current branch HEAD; do not check out the checkpoint as a rollback.
 
-Expected pickup build: fine-centering-v3.2
+Expected pickup build: demo-centering-v3.3
 Expected controller build: descent-taper-v1
+Urgent demo option: add --demo to grab_text.py --hand. This permits a maximum
+4 cm wrist correction in 0.5 cm steps and up to 12 observations; it refuses to
+descend/close if wrist alignment is not accepted. It is opt-in, keeps guarded
+descent, and does not fix an incorrect saved jaw-target calibration. Ordinary
+mode retains the fallback behaviour described below. Latest tests: 179 offline.
 Active entry point: grab_text.py
 Controller entry point: python3 -m arm.click (from controller/)
 
@@ -292,7 +297,7 @@ Key source files:
 Offline test command from Linux repo root:
   .venv/bin/python -B -m unittest discover -q
 
-The latest suite passes 174 tests on the development Mac using its existing sibling
+The latest suite passes 179 tests on the development Mac using its existing sibling
 venv (the earlier cc63f63 checkpoint passed 165). SAM outputs and hardware feedback are mocked; geometry simulations are
 synthetic. No robot or live GPU inference was run by Codex there. Test results
 must not be described as physical grasp success or millimetre accuracy.
