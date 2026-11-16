@@ -45,14 +45,33 @@ class SmallObjectTests(unittest.TestCase):
         for text in ('white bottle','black cylinder','small object','white cap'):
             self.assertIsNone(small.profile_for(text))
 
-    def test_same_automatic_height_for_cylinder_in_both_orientations(self):
+    def test_orientation_selects_cylinder_height_automatically(self):
         args = types.SimpleNamespace(last_text='small white cylinder',close=None,object_height=None,above=14.)
         with patch.object(grab,'estimate_height',side_effect=AssertionError('upright-only height guess forbidden')):
-            for orientation in ('upright','sideways'):
-                close,above,est = grab.grab_heights(args,cylinder_mask(orientation),(1280,720))
-                self.assertEqual(close,.5)
+            for orientation, expected in [('upright',1.),('sideways',.5)]:
+                mask = cylinder_mask(orientation)
+                fit = small.aim_from_mask(small.CYLINDER,mask,geometry())
+                close,above,est = grab.grab_heights(args,mask,(1280,720),aim=fit)
+                self.assertEqual(close,expected)
+                self.assertEqual(est[0],2*expected)
+                self.assertTrue(args.height_decision['orientation_accepted'])
+                self.assertFalse(args.height_decision['depth_measured'])
                 self.assertEqual(above,14.)
                 self.assertEqual(est[1],1.)
+
+    def test_ambiguous_missing_tiny_or_clipped_pose_does_not_raise_grip(self):
+        fit = small.aim_from_mask(small.CYLINDER,cylinder_mask('upright'),geometry())
+        for rejected in (None, {**fit,'fit_iou':.6},
+                         {**fit,'orientation_scores':{'upright':.95,'sideways':.90}},
+                         {**fit,'orientation_scores':{'upright':float('nan'),'sideways':.1}},
+                         {**fit,'mask_area_px':30}, {**fit,'mask_extent_px':[4,30]},
+                         {**fit,'touches_frame_edge':True}):
+            with self.subTest(rejected=rejected):
+                decision = small.height_decision(small.CYLINDER,rejected)
+                self.assertEqual(decision['closing_height_cm'],.5)
+                self.assertFalse(decision['orientation_accepted'])
+                self.assertIsNone(decision['object_height_cm'])
+                self.assertEqual(decision['source'],'cylinder_pose_uncertain_fallback')
 
     def test_cap_uses_low_profile_instead_of_15mm_fallback(self):
         args = types.SimpleNamespace(last_text='small black cap',close=None,object_height=None,above=14.)
@@ -60,6 +79,9 @@ class SmallObjectTests(unittest.TestCase):
             close,above,est = grab.grab_heights(args,None,(1280,720))
         self.assertEqual(close,.5)
         self.assertEqual(est[0],.75)  # explicit range midpoint hint, not a measured height
+        self.assertIsNone(args.height_decision['object_height_cm'])
+        self.assertFalse(args.height_decision['depth_measured'])
+        self.assertEqual(args.height_decision['source'],'cap_height_range_fallback')
         self.assertEqual(small.CAP['height_range_cm'],[.5,1.])
 
     def test_projected_cylinder_centres_across_orientations_and_positions(self):
@@ -69,6 +91,9 @@ class SmallObjectTests(unittest.TestCase):
                     fit = small.aim_from_mask(small.CYLINDER,cylinder_mask(orientation,yaw,xy),geometry())
                     self.assertLess(np.linalg.norm(np.array(fit['xy_cm'])-xy),.4)
                     self.assertGreater(fit['fit_iou'],.75)
+                    decision = small.height_decision(small.CYLINDER,fit)
+                    self.assertTrue(decision['orientation_accepted'])
+                    self.assertEqual(decision['closing_height_cm'],1. if orientation == 'upright' else .5)
 
     def test_missing_default_phrase_retries_sideways_phrase(self):
         c = candidate(cylinder_mask('sideways'))
@@ -114,6 +139,28 @@ class SmallObjectTests(unittest.TestCase):
         low = grab.base_pixel(mask)
         centre_pixel = small.project(np.array([[*fit['xy_cm'],0.]]),geometry())[0]
         self.assertGreater(np.linalg.norm(np.array(low)-centre_pixel),1.)
+
+    def test_request_fits_pose_before_selecting_height_and_rejects_displaced_fit(self):
+        image=Image.new('RGB',(1280,720)); encoded=io.BytesIO(); image.save(encoded,format='JPEG')
+        response=Mock(json=lambda:{'capabilities':{}},content=encoded.getvalue())
+        for orientation, accepted_xy, expected in [('upright',(3.,25.),1.),
+                                                   ('sideways',(3.,25.),.5),
+                                                   ('upright',(10.,25.),.5)]:
+            args=types.SimpleNamespace(arm_url='http://offline-test',close=None,object_height=None,above=14.)
+            c=candidate(cylinder_mask(orientation))
+            with self.subTest(orientation=orientation,accepted_xy=accepted_xy), \
+                    patch.object(grab.requests,'get',return_value=response), \
+                    patch.object(Image.Image,'save'), patch('pathlib.Path.mkdir'), \
+                    patch.object(grab,'detect_fixed',return_value={'candidates':[c]}), \
+                    patch.object(grab,'in_reach',return_value=(accepted_xy,True)), \
+                    patch.object(grab,'camera_geometry',return_value=geometry()), \
+                    patch.object(grab,'show_view'), patch.object(grab,'go') as go, \
+                    redirect_stdout(io.StringIO()):
+                grab.find_and_grab(args,'small white cylinder')
+                self.assertEqual(go.call_args.args[6],expected)
+                if accepted_xy != (3.,25.):
+                    self.assertIsNone(go.call_args.kwargs['aim'])
+                    self.assertFalse(args.height_decision['orientation_accepted'])
 
     def test_profile_preview_never_moves_or_uses_wrist(self):
         args=types.SimpleNamespace(last_text='small white cylinder',close=None,object_height=None,

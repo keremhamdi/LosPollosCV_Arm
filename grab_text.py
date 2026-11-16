@@ -29,7 +29,7 @@ from PIL import Image
 import target_selector_v5 as ts
 import small_object_grasp as small_grasp
 
-PICKUP_BUILD = 'small-object-profiles-v1'
+PICKUP_BUILD = 'pose-height-v2'
 
 
 def base_pixel(mask):
@@ -228,18 +228,25 @@ def estimate_height(a, mask, img_size):
 FALLBACK_CLOSE_CM = 1.5   # where the jaws close when the object's height couldn't be worked out
 
 
-def grab_heights(a, mask, img_size):
+def grab_heights(a, mask, img_size, aim=None):
     """Where the jaws close and where they come from, for this object.
     --close given: always that. Otherwise about half the object's estimated height."""
     profile = small_grasp.profile_for(getattr(a,'last_text',''))
-    est = (profile['height_hint_cm'], profile.get('diameter_cm'), None) if profile else estimate_height(a, mask, img_size)
+    decision = small_grasp.height_decision(profile, aim) if profile else None
+    a.height_decision = decision
+    est = (decision['hover_height_hint_cm'], profile.get('diameter_cm'), None) if profile else estimate_height(a, mask, img_size)
     measured = getattr(a, 'object_height', None)
     if measured is not None:
         est = (measured, est[1] if est else None, est[2] if est else None)
+        if decision:
+            decision.update(object_height_cm=measured, hover_height_hint_cm=measured)
     if a.close is not None:
+        if decision:
+            decision.update(source='manual_closing_height', closing_height_cm=a.close,
+                            reason='explicit --close override')
         return a.close, a.above, est
     if profile is not None and measured is None:
-        return profile['grip_height_cm'], a.above, est
+        return decision['closing_height_cm'], a.above, est
     if est is None or est[0] is None:
         return FALLBACK_CLOSE_CM, a.above, est           # height unknown: low enough for small things
     h = est[0]
@@ -247,6 +254,10 @@ def grab_heights(a, mask, img_size):
     # conservative existing floor for the unvalidated single-RGB height estimate.
     minimum = .5 if measured is not None else 1.5
     close = min(6.0, max(minimum, 0.5 * h))
+    if decision and measured is not None:
+        decision.update(source='manual_object_height', object_height_cm=measured,
+                        hover_height_hint_cm=measured, closing_height_cm=round(close,1),
+                        reason='explicit --object-height override')
     return round(close, 1), max(a.above, round(h + 5, 1)), est
 
 
@@ -398,12 +409,8 @@ def find_and_grab(a, text):
         best = max(near, key=lambda c: c["target_score"])   # the highest score among what the arm can reach
         Image.fromarray(np.asarray(best['mask'],dtype=np.uint8)*255).save('pick_views/selected_mask.png')
         u, v = base_pixel(np.asarray(best["mask"]))
-        close, above, est = grab_heights(a, best["mask"], img.size)
         aim = None
         if profile:
-            print(f"Automatic profile: {profile['name']}; closing at {close:g} cm")
-            if profile['name'] == 'black cap':
-                print('  cap height range 0.5–1.0 cm; 0.5 cm is the fingertip clearance limit')
             try:
                 geometry = camera_geometry(a,img.size)
                 if geometry is not None:
@@ -419,6 +426,10 @@ def find_and_grab(a, text):
                         print('  object-centre fit disagrees with standing aim; retaining standing aim')
             except (ValueError, np.linalg.LinAlgError, cv2.error) as exc:
                 print(f'  object-centre fit unavailable: {exc}')
+        close, above, est = grab_heights(a, best["mask"], img.size, aim=aim)
+        if profile:
+            print(f"Automatic profile: {profile['name']}; closing at {close:g} cm")
+            print('  Height decision: ' + a.height_decision['reason'])
         tall = (profile['name'] + ' profile, ') if profile else (f"about {est[0]:.1f} cm tall, " if est and est[0] else "")
         show_view(img, res["candidates"], best, u, v, f"'{text}': {tall}closing at {close} cm")
         return go(a, img, u, v, f"'{text}'", best["target_score"], close, above, est, aim=aim)
@@ -787,6 +798,7 @@ SQUEEZE_CM = 1.0         # close the jaws this much narrower than the object: ho
 
 def go(a, img, u, v, what, score, close=None, above=None, est=None, aim=None):
     profile = small_grasp.profile_for(getattr(a,'last_text',''))
+    decision = getattr(a, 'height_decision', None)
     where = ({'x':aim['xy_cm'][0], 'y':aim['xy_cm'][1]} if aim else
              requests.post(a.arm_url + "/api/click", json={"u": u, "v": v, "size": img.width}, timeout=10).json())
     print(f"Found {what} (score {score:.2f}) at pixel {u:.0f},{v:.0f} "
@@ -796,9 +808,12 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None, aim=None):
     h, width, center = est if est else (None, None, None)
     source = ('manual override' if a.close is not None else
               'measured object height' if getattr(a, 'object_height', None) is not None else
+              decision['source'] if decision else
               profile['name'] + ' automatic low-grip profile' if profile else
               'height estimate' if h else 'fallback; object height unknown')
     print(f"Planned closing height: {close:g} cm above the calibrated table ({source}); approach {above:g} cm.")
+    if not profile and a.close is None and getattr(a,'object_height',None) is None:
+        print('  General-object height is an upright-shape estimate/fallback, not verified depth; arbitrary poses are not validated.')
     if not a.side and not a.no_feel:
         print('Descent limit: planned closing height; the existing contact stop can stop it earlier.')
     if a.dry:
@@ -809,6 +824,7 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None, aim=None):
         body['pickup_build'] = PICKUP_BUILD
         body['object_profile'] = profile['name']
         body['height_source'] = source
+        body['height_decision'] = decision
         body['centre_fit'] = aim
     if not a.side and not a.no_feel:
         # Keep the friend's guarded descent, but honour the height already
@@ -841,8 +857,11 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None, aim=None):
             body['wrist_alignment_used'] = a.wrist_alignment_used
         body.pop("u"); body.pop("v")
         body["x"], body["y"] = round(gx, 2), round(gy, 2)
-    if h:
-        body["object_height"] = round(h, 1)   # lets the arm handle small and big objects differently
+    # A range midpoint is useful for wrist hover, but is not an object-height
+    # measurement. Only publish a single height when the source supports it.
+    object_h = decision['object_height_cm'] if decision else h
+    if object_h:
+        body["object_height"] = round(object_h, 2)
     if width:   # the jaws now stop by themselves on whatever they meet, so no width guess is needed
         print(f"About {width:.1f} cm wide.")
     r = requests.post(a.arm_url + "/api/grab", json=body, timeout=240).json()

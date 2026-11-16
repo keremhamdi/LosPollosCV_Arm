@@ -1,9 +1,8 @@
 """Profiles for the two demo objects, not a general RGB depth estimator.
 
-The white cylinder dimensions were measured by the operator. The cap height is
-only a supplied range. A common low grip works for either cylinder orientation;
-projected shape fitting improves the XY centre without making height depend on
-an unreliable aspect-ratio classification.
+The white cylinder dimensions were measured by the operator. Its projected
+shape can select an orientation-dependent grip when hypotheses are sufficiently
+separated. The cap has only a supplied range; neither profile measures depth.
 """
 import re
 
@@ -31,6 +30,48 @@ def profile_for(text):
     if {'black', 'cap'} <= words and 'white' not in words:
         return dict(CAP)
     return None
+
+
+def height_decision(profile, fit=None):
+    """Choose a height from accepted geometry, or explicitly label the fallback.
+
+    Fit thresholds are software heuristics, not calibrated probabilities. The
+    caller must reject fits inconsistent with the reachable standing-camera aim.
+    """
+    result = {
+        'closing_height_cm': profile['grip_height_cm'],
+        'object_height_cm': None,
+        'hover_height_hint_cm': profile['height_hint_cm'],
+        'depth_measured': False,
+        'orientation_accepted': False,
+    }
+    if profile['name'] == 'black cap':
+        result.update(source='cap_height_range_fallback',
+                      height_range_cm=profile['height_range_cm'],
+                      reason='cap height is only known to be 0.5–1.0 cm; using the 0.5 cm clearance floor, not a measured height')
+        return result
+    result.update(source='cylinder_pose_uncertain_fallback',
+                  height_range_cm=[profile['diameter_cm'], profile['length_cm']],
+                  reason='cylinder pose is uncertain or geometry unavailable; using the common 0.5 cm low grip')
+    if not fit or fit.get('source') != 'known_cylinder_silhouette':
+        return result
+    orientation = fit.get('orientation')
+    if orientation not in ('upright', 'sideways'):
+        return result
+    scores = fit.get('orientation_scores', {})
+    own, other = scores.get(orientation, 0.), scores.get('sideways' if orientation == 'upright' else 'upright', 0.)
+    iou = fit.get('fit_iou', 0.)
+    extent = fit.get('mask_extent_px', [0., 0.])
+    if (not np.isfinite([own, other, iou]).all() or iou < .7 or own - other < .12
+            or fit.get('mask_area_px', 0) < 80 or min(extent) < 6
+            or fit.get('touches_frame_edge', False)):
+        return result
+    height = profile['length_cm'] if orientation == 'upright' else profile['diameter_cm']
+    result.update(source='cylinder_pose_and_known_dimensions', orientation=orientation,
+                  orientation_accepted=True, object_height_cm=height, hover_height_hint_cm=height,
+                  closing_height_cm=max(.5, height / 2),
+                  reason=f'{orientation} cylinder shape with known dimensions: {height:g} cm high, grip at half height')
+    return result
 
 
 def detect(img, text, detector, exhaustive=False):
@@ -101,7 +142,7 @@ def aim_from_mask(profile, mask, geometry):
     """Known-cylinder silhouette hypotheses, or low-cap centroid projection.
 
     Returned coordinates depend on the existing approximate camera calibration.
-    Grip height is deliberately independent of the selected cylinder orientation.
+    height_decision applies stricter evidence checks before changing grip height.
     """
     mask = np.asarray(mask).astype(bool)
     ys,xs = np.nonzero(mask)
@@ -144,4 +185,8 @@ def aim_from_mask(profile, mask, geometry):
                 'orientation':'uncertain; low grip valid for both poses', 'fit_iou':best['fit_iou'],
                 'source':'cylinder_centre_height_prior'}
     best['orientation_scores'] = scores
+    best['mask_area_px'] = int(len(xs))
+    best['mask_extent_px'] = [int(np.ptp(xs)+1), int(np.ptp(ys)+1)]
+    best['touches_frame_edge'] = bool(xs.min() == 0 or ys.min() == 0
+                                    or xs.max() == mask.shape[1]-1 or ys.max() == mask.shape[0]-1)
     return best

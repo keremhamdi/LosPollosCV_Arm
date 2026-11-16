@@ -292,9 +292,10 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(submitted[-1][1]['guard'])
         self.assertEqual(self.reacher.grab.await_args.args[2],1.5)
 
-    async def test_automatic_small_objects_use_same_command_and_low_height(self):
+    async def test_automatic_objects_route_pose_height_and_explicit_cap_fallback(self):
         import grab_text
-        from test_small_object_grasp import cylinder_mask
+        import small_object_grasp as small
+        from test_small_object_grasp import cylinder_mask, geometry
         self.app.camera.locate = Mock(return_value=(3.,25.))
         def post(url, json, timeout):
             import json as wire_json
@@ -303,9 +304,9 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
             submitted.append((name,body))
             result = asyncio.run(self.app.api(name,body))
             return Mock(json=lambda:{'ok':True,**result})
-        for text,mask in [('small white cylinder',cylinder_mask('upright')),
-                          ('small white cylinder',cylinder_mask('sideways')),
-                          ('small black cap',cylinder_mask('sideways'))]:
+        for text,mask,expected in [('small white cylinder',cylinder_mask('upright'),1.),
+                                   ('small white cylinder',cylinder_mask('sideways'),.5),
+                                   ('small black cap',cylinder_mask('sideways'),.5)]:
             with self.subTest(text=text):
                 with patch.object(grab_text,'find_and_grab') as pick, redirect_stdout(io.StringIO()):
                     grab_text.main(['--text',text])  # no height, posture or camera switches
@@ -318,17 +319,26 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
                         patch.object(grab_text,'hand_correct',return_value=(3.,25.)) as wrist, \
                         patch.object(grab_text,'estimate_height',side_effect=AssertionError('No generic height guess')), \
                         redirect_stdout(io.StringIO()):
-                    close,above,est = grab_text.grab_heights(args,mask,(1280,720))
+                    fit = small.aim_from_mask(small.profile_for(text),mask,geometry())
+                    close,above,est = grab_text.grab_heights(args,mask,(1280,720),aim=fit)
                     await asyncio.to_thread(grab_text.go,args,Image.new('RGB',(1280,720)),600,600,
-                                            text,.8,close,above,est)
+                                            text,.8,close,above,est,aim=fit)
                 body = submitted[-1][1]
-                self.assertEqual(body['height'],.5)
+                self.assertEqual(body['height'],expected)
                 self.assertEqual((body['x'],body['y']),(3.,25.))
                 self.assertTrue(body['guard'])
                 self.assertNotIn('feel_all_the_way',body)
-                self.assertEqual(body['pickup_build'],'small-object-profiles-v1')
-                self.assertEqual(self.reacher.grab.await_args.args[2],.5)
+                self.assertEqual(body['pickup_build'],'pose-height-v2')
+                self.assertEqual(self.reacher.grab.await_args.args[2],expected)
+                self.assertEqual(body['height_decision']['closing_height_cm'],expected)
+                if text == 'small black cap':
+                    self.assertNotIn('object_height',body)
+                    self.assertEqual(body['height_source'],'cap_height_range_fallback')
+                else:
+                    self.assertEqual(body['object_height'],2*expected)
+                    self.assertEqual(body['height_source'],'cylinder_pose_and_known_dimensions')
                 wrist.assert_called_once()
+                self.assertEqual(wrist.call_args.args[-1],.75 if text == 'small black cap' else 2*expected)
 
     async def test_numeric_guarded_grab_closes_and_lifts_without_seeking_table(self):
         reach = self.reach_module.Reacher.__new__(self.reach_module.Reacher)
