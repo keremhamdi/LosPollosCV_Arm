@@ -55,6 +55,7 @@ GUARD_THRESH_CM = 0.6            # ... "met something" = the arm is this much hi
 GUARD_BLANK_S = 0.45             # ... not judged during the first moment (the arm is still getting going)
 GUARD_BACKOFF_CM = 0.3           # ... then lift off what it met by this much before closing
 GUARD_FROM_CM = 7.0              # ... starts feeling from this height (faster down to here)
+GUARD_CLEAR_CM = 2.0             # ... or from this far above the object's top, if that is higher
 GUARD_FLOOR_CM = -2.5            # ... gives up this far below where the table is thought to be
 MAX_JOINT_SPEED = 700            # peak continuous reference steps/s (~60 deg/s), before integer rounding
 STEPS_PER_RAD = 4096 / (2 * math.pi)
@@ -541,8 +542,13 @@ class Reacher:
         await self.follow(swing, self.duration(swing))
         report["tilt_deg"] = tilt
         if guard:
-            # fast and exact down to a height that clears most things, then slowly by feel
-            mid = min(above_h, max(GUARD_FROM_CM, plan_h + 2.0))
+            # fast and exact down to a height that clears the object, then slowly by feel. The feeling
+            # starts above the object's top when its height is known, so whatever the gripper meets
+            # (the top under the palm, or under a fingertip if the aim is a little off) is met slowly
+            # and felt, not run into.
+            clear = object_h + GUARD_CLEAR_CM if object_h else 0.0
+            mid = min(above_h, max(GUARD_FROM_CM, plan_h + 2.0, clear))
+            report["feel_from_cm"] = round(mid, 1)
             if above_h - mid > 0.5:
                 await self.follow(self.plan_line(x_cm, y_cm, mid), max(1.0, (above_h - mid) / 6))
             felt = await self.descend_guarded(x_cm, y_cm, grab_h if grab_h is not None else GUARD_FLOOR_CM)

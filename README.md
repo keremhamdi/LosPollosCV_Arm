@@ -130,6 +130,8 @@ is intentionally not committed. Synthetic fixtures are labelled tests only.
 | File | Purpose |
 | --- | --- |
 | `text_pick.py` | Combined text, two-camera, planning and optional pickup workflow |
+| `grab_text.py`, `dispense_server.py` | Type (or let Reachy ask for) an object and the arm grabs it: gripper-camera centring, going down by feel, retry on a miss |
+| `aim.py` | Where an outline in the fixed camera stands on the table: lens-corrected pixel to table mapping, footprint middle, height |
 | `target_selector_v5.py` | SAM 3 masks and optional identity verification |
 | `grasp_planner_v3.py`, `pick_v5.py` | Silhouette grasp candidates and approximate table mapping |
 | `arm_bridge.py` | Versioned HTTP contract and one-attempt controller submission |
@@ -139,6 +141,9 @@ is intentionally not committed. Synthetic fixtures are labelled tests only.
 | `calibration_validation.py` | Independent check measurements bound to the active geometry |
 | `two_camera_setup.json` | Incomplete template for measured two-camera geometry |
 | `calibrated_pair.py`, `multiview_geometry.py` | Offline calibrated triangulation utilities |
+
+How `grab_text.py` gets the jaws around small objects, and what to redo on the robot
+after updating (one `handcal`), is in [docs/GRAB_ACCURACY.md](docs/GRAB_ACCURACY.md).
 
 Provenance is in [NOTICE.md](NOTICE.md) and `controller/UPSTREAM.json`.
 Development details are in `INTEGRATION.md` and `docs/DEVELOPMENT_NOTES.md`.

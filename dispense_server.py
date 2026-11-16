@@ -22,8 +22,10 @@ GET  /v1/last       the last request and result (for Family/debug)
   .venv/bin/python dispense_server.py --listen-only      # no arm, no camera: only show what
                                                          # Reachy sends (to test the connection)
 
-Basic on purpose: one bowl position you give, no slots, place_verified is always false
-(not checked yet), "actions" and "slot_hint" are accepted and ignored.
+Picking is done exactly as grab_text.py does it (aim at the middle of where the object stands, centre
+the jaws with the gripper camera, go down by feel, look again and retry once if the jaws close on
+nothing): see docs/GRAB_ACCURACY.md. The rest is basic on purpose: one bowl position you give, no
+slots, place_verified is always false (not checked yet), "actions" and "slot_hint" are accepted and ignored.
 """
 import argparse
 import io
@@ -78,55 +80,76 @@ def load_meds(path):
     return meds
 
 
-def locate(a, name, min_conf):
-    """Find the medicine in the fixed camera. Returns (u, v, label, score, how).
+LABELLED_THINGS = ["medicine", "medicine box", "blister pack", "bottle", "box", "object"]
+
+
+def grab_settings(a):
+    """How grab_text aims, goes down and tries again, with this server's options."""
+    return G.options(arm_url=a.arm_url, close=a.close, above=a.above, tries=getattr(a, "tries", 2),
+                     no_hand=getattr(a, "no_hand", False), no_feel=getattr(a, "no_feel", False),
+                     reach_out=getattr(a, "reach_out", None), no_lens=getattr(a, "no_lens", False),
+                     no_zoom=getattr(a, "no_zoom", False))
+
+
+def locate(a, name, min_conf, near=None):
+    """Find the medicine in the fixed camera. Returns (target, label, score, how); target is what
+    grab_text grabs (where it stands on the table, its size). None if it isn't found or can't be reached.
     A name in --meds: look for what it looks like. Any other name: look for something that looks
     like the name itself; without --meds (or with --read-labels) first try reading it on a label."""
-    img = Image.open(io.BytesIO(requests.get(a.arm_url + "/frame.jpg", timeout=10).content)).convert("RGB")
+    ga = grab_settings(a)
+    img = G.frame(ga)
+    tmap = G.table_map(ga, img.size)
+    if tmap is None:
+        raise RuntimeError("the fixed camera is not calibrated (the arm page needs 4 or more marks)")
     look = a.meds.get(name.lower())
     if look:
-        ts.VLM_BACKEND = "none"
-        res = ts.decide(img, look, None)
-        if not res["candidates"]:
-            return None
-        best = max(res["candidates"], key=lambda c: c["target_score"])
-        u, v = G.base_pixel(np.asarray(best["mask"]))
-        return u, v, name.upper(), float(best["target_score"]), f"looks_like:{look}"
-    hit = None
+        t, _ = G.find_by_look(ga, img, tmap, look, near)
+        return (t, name.upper(), t["score"], f"looks_like:{look}") if t else None
     if a.read_labels or not a.meds:   # reading labels is slow: skip it when a --meds list is used
-        try:
-            hit = G.find_word(img, name)
-        except ImportError:
-            hit = None
-    if hit is not None and hit[3] >= min_conf:
-        wu, wv, read, conf = hit
-        obj = G.object_at(img, wu, wv, ["medicine", "medicine box", "blister pack", "bottle", "box", "object"])
-        if obj is not None:
-            u, v = G.base_pixel(obj["mask"])
-            return u, v, read.upper(), float(conf), "label_read"
-    ts.VLM_BACKEND = "none"
-    res = ts.decide(img, name, None)
-    if res["candidates"]:
-        best = max(res["candidates"], key=lambda c: c["target_score"])
-        u, v = G.base_pixel(np.asarray(best["mask"]))
-        return u, v, name.upper(), float(best["target_score"]), "by_look"
-    return None
+        t = G.find_by_word(ga, img, tmap, name, min_conf, LABELLED_THINGS)
+        if t is not None:
+            return t, t["read"].upper(), t["read_confidence"], "label_read"
+    t, _ = G.find_by_look(ga, img, tmap, name, near)
+    return (t, name.upper(), t["score"], "by_look") if t else None
 
 
 NOT_FOR_THE_ARM = {"knife", "knives", "scissors", "blade", "razor", "syringe", "needle", "hot", "boiling",
                    "weapon", "gun", "person", "people"}
 
 
-def locate_object(a, label):
-    """Find an everyday thing in the fixed camera by its look. Returns (u, v, label, score, how)."""
-    img = Image.open(io.BytesIO(requests.get(a.arm_url + "/frame.jpg", timeout=10).content)).convert("RGB")
-    ts.VLM_BACKEND = "none"
-    res = ts.decide(img, label, None)
-    if not res["candidates"]:
-        return None
-    best = max(res["candidates"], key=lambda c: c["target_score"])
-    u, v = G.base_pixel(np.asarray(best["mask"]))
-    return u, v, label, float(best["target_score"]), "by_look"
+def locate_object(a, label, near=None):
+    """Find an everyday thing in the fixed camera by its look. Returns (target, label, score, how)."""
+    ga = grab_settings(a)
+    img = G.frame(ga)
+    tmap = G.table_map(ga, img.size)
+    if tmap is None:
+        raise RuntimeError("the fixed camera is not calibrated (the arm page needs 4 or more marks)")
+    t, _ = G.find_by_look(ga, img, tmap, label, near)
+    return (t, label, t["score"], "by_look") if t else None
+
+
+def pick(a, target, find_again):
+    """Grab `target` the careful way (grab_text: gripper camera, going down by feel). If the jaws close
+    on nothing: look again with find_again(near) and try again, up to --tries grabs.
+    Returns (holding, a few words on what went wrong, number of grabs)."""
+    ga = grab_settings(a)
+    tries = max(1, int(ga.tries))
+    why = ""
+    for n in range(1, tries + 1):
+        res = G.grab_target(ga, target)
+        if not res["ok"]:
+            raise RuntimeError(res["error"] or "the arm refused the grab")
+        if res["holding"]:
+            return True, "", n
+        why = res["why"]
+        if n == tries:
+            break
+        G.clear_view(ga, target, res["above"])
+        again = find_again((target["x"], target["y"]))
+        if again is None:
+            return False, why + "; then it could not be found again", n
+        target = again[0]
+    return False, why, tries
 
 
 def check_taken(req):
@@ -171,8 +194,11 @@ def dispense(a, req, kind="dispense"):
         st = requests.get(a.arm_url + "/status", timeout=10).json()
         if st.get("read_only"):
             raise RuntimeError("arm controller is in read-only mode")
-        found = (locate(a, name, float(req.get("ocr_min_confidence", 0.65))) if kind == "dispense"
-                 else locate_object(a, name))
+        min_conf = float(req.get("ocr_min_confidence", 0.65))
+
+        def find(near=None):
+            return locate(a, name, min_conf, near) if kind == "dispense" else locate_object(a, name, near)
+        found = find()
         if place == "handover":
             bowl = (a.handover[0], a.handover[1])
         elif a.bowl:
@@ -187,18 +213,19 @@ def dispense(a, req, kind="dispense"):
         if found is None:
             out.update(detect_detail="not_found", error=f"could not find {name}")
             return out
-        u, v, label, score, how = found
-        xy = page(a, "click", {"u": u, "v": v, "size": 1280})
+        target, label, score, how = found
         out.update(label=label, score=round(score, 3),
-                   detect_detail=f"{how} at x={xy.get('x')}, y={xy.get('y')} cm")
+                   detect_detail=f"{how} at x={target['x']:.1f}, y={target['y']:.1f} cm")
         if req.get("dry_run"):
             out.update(ok=True, final_state="aborted", detect_detail=out["detect_detail"] + " (dry_run: no motion)")
             return out
-        got = page(a, "grab", {"u": u, "v": v, "size": 1280, "height": a.close, "above": a.above, "method": "top"})
-        if not got.get("holding"):
+        holding, why, grabs = pick(a, target, find)
+        if grabs > 1:
+            out["detect_detail"] += f"; {grabs} grabs"
+        if not holding:
             page(a, "park")
             out.update(detect_detail=out["detect_detail"] + "; gripper closed on nothing",
-                       error="pick failed: nothing in the gripper")
+                       error="pick failed: " + (why or "nothing in the gripper"))
             return out
         page(a, "place", {"x": bowl[0], "y": bowl[1], "height": a.bowl_height, "above": a.above})
         page(a, "park")
@@ -267,7 +294,15 @@ def main():
     ap.add_argument("--listen-only", action="store_true",
                     help="no arm, no camera: receive Reachy's requests, show them, answer 'not connected'")
     ap.add_argument("--bowl-height", type=float, default=8.0, help="let go this high above the table, cm")
-    ap.add_argument("--close", type=float, default=5.0, help="close the jaws this high above the table, cm")
+    ap.add_argument("--close", type=float, default=None,
+                    help="always close the jaws this high above the table, cm (default: go down until the "
+                         "gripper feels the table or the object's top, and close there)")
+    ap.add_argument("--tries", type=int, default=2,
+                    help="if the jaws close on nothing, look again and grab again, up to this many grabs (default 2)")
+    ap.add_argument("--no-hand", action="store_true", help="don't use the gripper camera to centre the jaws")
+    ap.add_argument("--no-feel", action="store_true", help="don't feel for the table on the way down")
+    ap.add_argument("--reach-out", type=float, default=None, metavar="CM",
+                    help="aim this many cm further from the base than measured (see grab_text.py)")
     ap.add_argument("--above", type=float, default=14.0, help="approach / carry height, cm")
     ap.add_argument("--arm-url", default="http://localhost:8890")
     ap.add_argument("--host", default="0.0.0.0", help="0.0.0.0 = reachable from Buddy's laptop")
@@ -276,6 +311,8 @@ def main():
     if ts is None and not a.listen_only:
         ap.error("camera/arm packages are missing: pip install -r requirements.txt (or use --listen-only)")
     a.meds = load_meds(a.meds)
+    if G is not None:
+        G.OPEN_VIEWS = False      # a server: save the pictures of what it found (pick_views/), don't pop them up
     if a.meds:
         print("Medicines:", ", ".join(f"{k} -> {v}" for k, v in a.meds.items()))
     where = f"bowl at {a.bowl[0]}, {a.bowl[1]}" if a.bowl else f"finds the '{a.bowl_text}' in the camera"
