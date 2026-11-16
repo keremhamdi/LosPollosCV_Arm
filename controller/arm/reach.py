@@ -37,8 +37,6 @@ from arm.station import REPO_ROOT
 
 from arm.vision_contract import GRIPPER_OPEN_CM, JAW_MARGIN_CM, width_fits
 from arm.trajectory_timing import bounded_duration, ease
-from arm.descent_contact import DescentContact
-from arm.vision_contract import MAX_JOINT_AGE_S
 
 TABLE_FILE = REPO_ROOT / "calib" / "table.json"
 IK_MOTORS = [1, 2, 3, 4, 5, 6]   # joint 7 (wrist roll) stays where it is, 8 is the gripper
@@ -259,10 +257,10 @@ class Reacher:
         what = f"with tilt {tilt}" if tilt is not None else f"even leaning {MAX_AUTO_TILT} degrees"
         raise Unreachable(f"Can't reach x={x_cm:.1f}, y={y_cm:.1f}, height={list(heights)} {what}. Too far, too close, or a joint limit.")
 
-    def _check_floor(self, path, target_h_cm, start_angles=None):
+    def _check_floor(self, path, target_h_cm):
         """Floor rule: nothing from the forearm to the fingertips may dip towards the table."""
         t = self.table
-        p0, _, pts0 = self.tip(self.current_angles() if start_angles is None else start_angles)
+        p0, _, pts0 = self.tip(self.current_angles())
         tip_floor = min(target_h_cm, t.height(p0) * 100) - 0.7
         start_h = [t.height(p) * 100 for p in pts0]
         for q in path:
@@ -283,7 +281,7 @@ class Reacher:
         self._check_floor(path, target_h_cm)
         return path
 
-    def plan_line(self, x_cm, y_cm, h_cm, partial=False, allow_below=False, step_cm=STEP_CM, from_measured=False):
+    def plan_line(self, x_cm, y_cm, h_cm, partial=False, allow_below=False, step_cm=STEP_CM):
         """The tip travels in a straight line and the gripper keeps the direction it has now.
         For going down onto an object and lifting it. With partial=True, a line the arm can't
         finish returns the part it can do (for lifting: as high as possible) instead of failing.
@@ -292,8 +290,7 @@ class Reacher:
         if h_cm < MIN_TIP_HEIGHT and not allow_below:
             raise Unreachable(f"Height {h_cm} cm is below the minimum of {MIN_TIP_HEIGHT} cm above the table.")
         target = self._target(x_cm, y_cm, h_cm)
-        q = self.measured_angles() if from_measured else self.current_angles()
-        q_start = dict(q)
+        q = self.current_angles()
         p0, d0, _ = self.tip(q)
         steps = max(4, int(math.dist(p0, target) * 100 / step_cm))
         path = []
@@ -306,7 +303,7 @@ class Reacher:
                 raise Unreachable(f"Can't follow a straight line to x={x_cm:.1f}, y={y_cm:.1f}, height={h_cm:g} "
                                   f"(stuck {i / steps:.0%} along the way). Too far, or a joint limit.")
             path.append(q)
-        self._check_floor(path, h_cm, start_angles=q_start if from_measured else None)
+        self._check_floor(path, h_cm)
         return path
 
     async def follow(self, path, seconds, correct_sag=True, feedforward=False):
@@ -413,61 +410,31 @@ class Reacher:
 
     # ---------- going down by feel ----------
 
-    def _descent_feedback(self):
-        """Require every kinematic joint to be fresh; another motor can't refresh it."""
-        now = time.monotonic()
-        stamps = []
-        for motor in MOTOR_JOINTS:
-            j = self.arm.joints.get(motor)
-            stamp = self.arm.joint_updated_at.get(motor, -math.inf)
-            if (j is None or not j.calibrated or not j.torque
-                    or not math.isfinite(stamp) or not 0 <= now - stamp <= MAX_JOINT_AGE_S):
-                raise RuntimeError(f'DESCENT_FEEDBACK_INVALID: joint {motor} is stale, uncalibrated or torque-off')
-            stamps.append(stamp)
-        return tuple(stamps)
-
-    async def _hold_descent_position(self, motors):
-        """Stop advancing the reference, keep torque on, and clear obsolete sag offsets."""
-        await self.arm._write([(m, GOAL_POSITION, self.arm.joints[m].raw.to_bytes(2, 'little')) for m in motors])
-        for m in motors:
-            self.arm.sag.pop(m, None)
-
-    async def descend_guarded(self, x_cm, y_cm, floor_cm, speed=None, backoff=None, report=None):
+    async def descend_guarded(self, x_cm, y_cm, floor_cm, speed=None, backoff=None):
         """Straight down from where the tip is, slowly, towards floor_cm above the table, and stop at
         the first thing the gripper meets: the table under the fingertips, or the top of an object
         under the palm. Then lift off that by `backoff` cm and hold there.
 
-        Contact is inferred from sustained stationary encoder/FK height while the
-        reference continues down, after verified free descent. Lag alone is not
-        contact. This cannot distinguish a table from another obstruction.
+        How it feels: it compares, 25 times a second, the height the arm was told to be at with the
+        height the encoders say it is at. While moving freely the two stay a steady small distance
+        apart. When that distance suddenly grows, something is holding the gripper up.
 
         floor_cm may be below 0 (to find a table that lies lower than expected). If nothing is met,
         the arm ends at floor_cm (or as low as it can reach).
         Returns {"contact": bool, "height_cm": where it stopped by the arm's own reading, before lifting off,
                  "final_cm": where it holds now}."""
         arm = self.arm
-        speed = GUARD_SPEED_CM_S if speed is None else speed
+        speed = speed or GUARD_SPEED_CM_S
         backoff = GUARD_BACKOFF_CM if backoff is None else backoff
-        if not all(math.isfinite(v) for v in (speed, backoff, floor_cm)) or speed <= 0 or not 0 <= backoff <= 2:
-            raise ValueError('Descent needs a positive speed and backoff between 0 and 2 cm')
-        report = report if report is not None else {}
-        report.update(source='encoder_fk_not_force_sensor', samples=[], requested_floor_cm=floor_cm,
-                      backoff_cm=backoff, stop_reason='starting')
-        self._descent_feedback()
         t = self.table
-        path = self.plan_line(x_cm, y_cm, floor_cm, partial=True, allow_below=True, step_cm=0.5, from_measured=True)
+        path = self.plan_line(x_cm, y_cm, floor_cm, partial=True, allow_below=True, step_cm=0.5)
         ff = {m: arm.sag.get(m, 0) for m in IK_MOTORS}       # what the arm needs to hold itself up, from the last stop
         await arm.hold()
         cmd = IK_MOTORS + [7] if roll_raw() is not None else IK_MOTORS
-        q_from = self.measured_angles()
-        h_from = t.height(self.tip(q_from)[0]) * 100
+        h_from = t.height(self.tip(self.current_angles())[0]) * 100
         heights = [h_from] + [t.height(self.tip(q)[0]) * 100 for q in path]            # told-to-be heights along the way
-        true = [{m: self._raw(m, q_from[MOTOR_JOINTS[m]]) for m in cmd}] + [{m: self._raw(m, q[MOTOR_JOINTS[m]]) for m in cmd} for q in path]
-        # Preserve the existing servo reference at t=0, then interpolate into
-        # the measured-start path with the existing feedforward. No initial jump.
-        aims = [{m: arm.joints[m].goal for m in cmd}]
-        aims.extend({m: max(arm.joints[m].range_min, min(arm.joints[m].range_max, p[m] + ff.get(m, 0)))
-                     for m in cmd} for p in true[1:])
+        start = {m: (arm.joints[m].goal if arm.joints[m].torque else arm.joints[m].raw) for m in cmd}
+        true = [{m: start[m] - ff.get(m, 0) for m in cmd}] + [{m: self._raw(m, q[MOTOR_JOINTS[m]]) for m in cmd} for q in path]
 
         def goals_at(f):
             i = min(len(true) - 2, int(f))
@@ -475,71 +442,56 @@ class Reacher:
             out = {}
             for m in cmd:
                 j = arm.joints[m]
-                v = aims[i][m] + (aims[i + 1][m] - aims[i][m]) * u
+                v = true[i][m] + (true[i + 1][m] - true[i][m]) * u + ff.get(m, 0)
                 out[m] = int(max(j.range_min, min(j.range_max, round(v))))
             return out, heights[i] + (heights[i + 1] - heights[i]) * u
 
         n = len(true) - 1
         total = max(0.2, (heights[0] - heights[-1]) / speed)
-        # Also bound joint reference speed in this constant-speed descent.
-        largest = max(abs(b[m] - a[m]) for a, b in zip(aims, aims[1:]) for m in cmd)
-        total = max(total, n * largest / MAX_JOINT_SPEED)
-        detector = DescentContact((heights[0] - heights[-1]) / total, GUARD_THRESH_CM, GUARD_BLANK_S)
-        report['detector'] = {'threshold_cm': detector.threshold, 'blank_s': detector.blank,
-                              'window_s': detector.window, 'stationary_span_cm': .10,
-                              'required_free_travel_cm': .25}
-        t0, seen = time.monotonic(), self._descent_feedback()
-        detector.update(0., h_from, self.state()[2])
-        contact, h_stop = False, None
-        try:
-            while True:
-                self._descent_feedback()
-                el = time.monotonic() - t0
-                s = min(1.0, el / total)
-                goals, h_told = goals_at(s * n)
-                await arm._write([(m, GOAL_POSITION, g.to_bytes(2, 'little')) for m, g in goals.items()])
-                await asyncio.sleep(1 / SEND_RATE_HZ)
-                stamps = self._descent_feedback()
-                if all(new > old for new, old in zip(stamps, seen)):
-                    seen = stamps
-                    mx, my, h_is, _ = self.state()
-                    evidence = detector.update(time.monotonic() - t0, h_told, h_is)
-                    report['samples'].append({'elapsed_s': time.monotonic() - t0, 'target_cm': h_told,
-                                              'tip_cm': [mx, my, h_is],
-                                              'joints_raw': {str(m): arm.joints[m].raw for m in MOTOR_JOINTS},
-                                              'joints_goal': {str(m): arm.joints[m].goal for m in MOTOR_JOINTS},
-                                              **evidence})
-                    if evidence['reason'] == 'blocked_before_descent':
-                        raise RuntimeError('DESCENT_BLOCKED: no free downward motion was verified; jaws remain open')
-                    if evidence['contact']:
+        t0, seen_t = time.monotonic(), None
+        hist, over, contact, h_stop = [], 0, False, None
+        while True:
+            el = time.monotonic() - t0
+            s = min(1.0, el / total)
+            goals, h_told = goals_at(s * n)
+            await arm._write([(m, GOAL_POSITION, g.to_bytes(2, "little")) for m, g in goals.items()])
+            await asyncio.sleep(1 / SEND_RATE_HZ)
+            if arm.last_update != seen_t:
+                seen_t = arm.last_update
+                h_is = self.state()[2]
+                gap = h_is - h_told                      # how far above its told height the arm is
+                hist.append((el, gap))
+                if el > GUARD_BLANK_S:
+                    # its usual lag: the last half second, leaving out the start-up and the newest readings
+                    usual = [g for tt, g in hist if tt >= 0.25 and el - 0.7 <= tt <= el - 0.12]
+                    if usual and gap - min(usual) > GUARD_THRESH_CM:
+                        over += 1
+                    else:
+                        over = 0
+                    if over >= 2:
                         contact, h_stop = True, h_is
                         break
-                if s >= 1.0:
-                    break
-        except (RuntimeError, ValueError):
-            report['stop_reason'] = 'feedback_or_motion_error'
-            await self._hold_descent_position(cmd)
-            raise
+            if s >= 1.0:
+                break
         if contact:
-            report['stop_reason'] = 'contact_inferred'
-            # Remove the downward push first. Back off from the measured position,
-            # not a distant nominal waypoint, with no extra sag correction at contact.
-            await self._hold_descent_position(cmd)
-            if backoff:
-                mx, my, mh, _ = self.state()
-                up = self.plan_line(mx, my, mh + backoff, allow_below=True, from_measured=True)
-                await self.follow(up, .6, correct_sag=False)
+            # hold a little above where it met something: the point of the way down with that height
+            want = h_stop + backoff
+            f = 0.0
+            for i in range(n):
+                if heights[i] >= want >= heights[i + 1]:
+                    f = i + (heights[i] - want) / max(1e-6, heights[i] - heights[i + 1])
+                    break
+            goals, _ = goals_at(f)
+            end = {m: goals[m] - ff.get(m, 0) for m in cmd}
+            await arm._write([(m, GOAL_POSITION, g.to_bytes(2, "little")) for m, g in goals.items()])
+            await arm._settle_and_ease(end, True, aim=goals)
         else:
-            report['stop_reason'] = 'floor_reached_without_contact'
             end = true[-1]
             goals, _ = goals_at(float(n))
-            await arm._settle_and_ease(end, False, aim=goals)
+            below = heights[-1] < MIN_TIP_HEIGHT      # was aiming under the table and never felt it
+            await arm._settle_and_ease(end, not below, aim=goals)
             h_stop = self.state()[2]
-        self._descent_feedback()
-        result = {"contact": contact, "height_cm": round(h_stop, 2), "final_cm": round(self.state()[2], 2),
-                  'stop_reason': report['stop_reason']}
-        report.update(result)
-        return result
+        return {"contact": contact, "height_cm": round(h_stop, 2), "final_cm": round(self.state()[2], 2)}
 
     def plan(self, x_cm, y_cm, h_cm, tilt=None, line=False):
         """Returns (path, tilt used or None for a straight line)."""
@@ -572,10 +524,10 @@ class Reacher:
         grab_h is how high above the table the fingertips are when they close.
         Returns True if the gripper closed on something.
 
-        guard=True: the last part uses encoder-based stop evidence (descend_guarded).
-        With grab_h=None it searches for a stop, then backs off before closing.
-        This may be a table or another obstruction; it is not depth/force sensing
-        and does not establish that the object is correctly between the fingers.
+        guard=True: the last part of the way down is done by feel (descend_guarded). With grab_h=None
+        the gripper goes down until it meets something: the table (small objects: the fingertips end
+        right at the table, the lowest and safest grip) or the object's top under the palm (tall
+        objects). So neither the table's exact height nor the object's height has to be known.
         `report` (a dict) is filled with what happened, for printing.
         """
         arm = self.arm
@@ -593,12 +545,8 @@ class Reacher:
             mid = min(above_h, max(GUARD_FROM_CM, plan_h + 2.0))
             if above_h - mid > 0.5:
                 await self.follow(self.plan_line(x_cm, y_cm, mid), max(1.0, (above_h - mid) / 6))
-            report['descent'] = {}
-            felt = await self.descend_guarded(x_cm, y_cm, grab_h if grab_h is not None else GUARD_FLOOR_CM,
-                                              report=report['descent'])
+            felt = await self.descend_guarded(x_cm, y_cm, grab_h if grab_h is not None else GUARD_FLOOR_CM)
             report.update(contact=felt["contact"], met_at_cm=felt["height_cm"], closed_at_cm=felt["final_cm"])
-            if grab_h is None and not felt['contact']:
-                raise RuntimeError('DESCENT_NO_CONTACT: reached the search floor without contact evidence; jaws remain open')
         else:
             down = self.plan_line(x_cm, y_cm, grab_h)
             # Going down, depending on the object (object_h, cm; None = unknown, treated as small):

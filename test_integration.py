@@ -248,11 +248,6 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
                                             grab_side=AsyncMock(return_value=False), state=lambda: (1, 2, 3, 0))
         self.app.reacher = self.reacher
         self.app.observation_model = self.reacher.model
-        self.trace_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.trace_dir.cleanup)
-        patcher = patch.dict(self.App.api.__globals__, {'GRASP_RUNS': Path(self.trace_dir.name)})
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     async def test_side_route_honors_lift_height_and_structured_result(self):
         result = await self.app.api("grab", {"x": 1, "y": 2, "z": 4, "above": 15, "jaws": 3, "method": "side", "protocol_version": 1})
@@ -265,19 +260,6 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         result = await self.app.api("grab", {"x": 1, "y": 2, "z": 4, "above": 12})
         self.reacher.grab.assert_awaited_once_with(1, 2, 4, 12, object_h=None, close_pct=0.0)
         self.assertTrue(result["holding"])
-
-    async def test_failed_guarded_descent_keeps_report_and_does_not_claim_holding(self):
-        async def fail(*args, **kwargs):
-            kwargs['report']['descent'] = {'stop_reason':'feedback_or_motion_error', 'samples':[]}
-            raise RuntimeError('DESCENT_BLOCKED: test obstruction')
-        self.reacher.grab.side_effect = fail
-        result = await self.app.api('grab', {'x':1,'y':2,'height':1.5,'above':14,'guard':True,'feel_all_the_way':True})
-        self.assertFalse(result['ok'])
-        self.assertFalse(result['holding'])
-        self.assertFalse(self.app.busy)
-        report = json.loads(Path(result['report']['trace_path']).read_text())
-        self.assertIn('DESCENT_BLOCKED',report['error'])
-        self.assertEqual(self.app.last_grasp_report['stop_reason'],'feedback_or_motion_error')
 
     async def test_bridge_to_controller_end_to_end_without_sockets(self):
         session = Mock()

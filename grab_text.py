@@ -12,6 +12,7 @@
       q                   -> quit
   .venv/bin/python grab_text.py --text "small bottle"     # one grab, then exit
   add --dry to only show what it found and where, without moving
+  standing-camera guidance is the default; add --hand to enable wrist-camera corrections
 
 Needs the arm page running WITHOUT --read-only, follower (Self-controlled), Hold arm pressed.
 The page's buttons keep working at the same time. Reading writing needs once: uv pip install easyocr
@@ -404,7 +405,7 @@ def put(a, x, y):
     action(a, "place", {"x": x, "y": y, "height": a.put_height, "above": a.above})
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--text", help="grab this once and exit (no typing)")
     ap.add_argument("--word", help='grab the thing with this written on it, once, and exit')
@@ -414,14 +415,21 @@ def main():
     ap.add_argument("--above", type=float, default=14.0, help="approach and lift height, cm")
     ap.add_argument("--side", action="store_true", help="grab from the side instead of the top")
     ap.add_argument("--bring", nargs=2, type=float, metavar=("X", "Y"), help="hand-over spot for 'bring', cm")
-    ap.add_argument("--no-hand", action="store_true", help="don't use the gripper camera to correct the aim")
+    wrist = ap.add_mutually_exclusive_group()
+    wrist.add_argument("--hand", dest="no_hand", action="store_false",
+                       help="explicitly enable the existing wrist-camera alignment (off by default)")
+    wrist.add_argument("--no-hand", dest="no_hand", action="store_true",
+                       help="use standing-camera guidance only (the default)")
+    ap.set_defaults(no_hand=True)
     ap.add_argument("--reach-out", type=float, default=1.0, metavar="CM",
                     help="aim this many cm further from the base than measured, because the arm tends to "
                          "stop short (default 1; 0 = off)")
     ap.add_argument("--no-feel", action="store_true",
                     help="don't feel for the table on the way down (the old way: trust the table's height)")
     ap.add_argument("--dry", action="store_true", help="find things and say where, never move")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
+    print('Pickup guidance: ' + ('standing camera only; wrist alignment OFF' if a.no_hand else
+                                'standing camera + wrist alignment ON'))
 
     if a.text or a.word:
         return find_and_grab(a, a.text or a.word)
@@ -690,12 +698,8 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None):
     close = close if close is not None else (a.close if a.close is not None else 3.0)
     above = above if above is not None else a.above
     h, width, center = est if est else (None, None, None)
-    feeling = not a.side and not a.no_feel
-    if feeling and a.close is None:
-        print(f'Descending from {above:g} cm until sustained contact evidence; height estimate does not set the closing point.')
-    else:
-        print((f'Estimated height {h:.1f} cm. ' if h else 'Height unknown. ') +
-              f'Requested closing height {close:g} cm, approach {above:g} cm.')
+    kind = ("small: ends a little low going down" if h < 6 else "big: holds the exact height going down") if h else "size unknown: treated as small"
+    print((f"About {h:.1f} cm tall ({kind}): " if h else f"({kind}) ") + f"closing the jaws {close} cm above the table, coming from {above} cm")
     if a.dry:
         return
     body = {"u": u, "v": v, "size": img.width, "height": close, "above": above,
@@ -709,10 +713,11 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None):
             body["feel_all_the_way"] = True
     if not a.side and where.get("x") is not None:
         gx, gy = float(where["x"]), float(where["y"])
-        try:
-            gx, gy = hand_correct(a, a.last_text, gx, gy, h)
-        except (RuntimeError, ValueError, requests.RequestException, np.linalg.LinAlgError) as e:
-            print(f"  gripper camera skipped: {e}")
+        if not a.no_hand:
+            try:
+                gx, gy = hand_correct(a, a.last_text, gx, gy, h)
+            except (RuntimeError, ValueError, requests.RequestException, np.linalg.LinAlgError) as e:
+                print(f"  gripper camera skipped: {e}")
         if a.reach_out:
             # The arm tends to stop a little short, towards its base. Aim this far further out,
             # straight away from the base (--reach-out, cm).
@@ -730,12 +735,8 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None):
         print(f"About {width:.1f} cm wide.")
     r = requests.post(a.arm_url + "/api/grab", json=body, timeout=240).json()
     rep = r.get("report") or {}
-    if rep.get('trace_path'):
-        print('Grasp report: ' + rep['trace_path'])
-    if rep.get('descent', {}).get('stop_reason'):
-        print('Descent stop: ' + rep['descent']['stop_reason'])
     if rep.get("contact"):
-        print(f"  inferred contact at {rep['met_at_cm']} cm; after backoff {rep['closed_at_cm']} cm (encoder/FK heights)")
+        print(f"  felt something {rep['met_at_cm']} cm above where the table was thought to be, closed there")
     elif "contact" in rep:
         print("  went all the way down without feeling anything")
     if rep.get("jaws_gap_cm") is not None:

@@ -1,100 +1,74 @@
-# Current arm work: premature closing on small objects
+# Current step: restore the friend's pickup, standing camera only
 
-Branch: `feel-grab-reachy`. Baseline: friend's commit `a8ccb74`.
-Controller update: **`feel-stop-v2`** (reported in `/status` capabilities).
+Branch: `feel-grab-reachy`. Motion baseline: friend's commit `a8ccb74`.
+Running-controller identifier: **`friend-baseline-v1`** in `/status` capabilities.
 
-The reported failure is that the arm stops too high and closes above the object.
-Code inspection found a reproducible way this can happen: the old guarded
-descent classified increasing commanded-versus-measured height error as contact
-after only two readings. It did not check whether the fingertips were still
-descending. Changes in servo lag could therefore trigger closing in free space.
-This is a demonstrated software failure mode, not yet the confirmed cause of
-every miss on the physical robot.
+## Why the last update was rolled back
 
-## What changed
+The `feel-stop-v2` update (`7cefa06`) introduced a stricter encoder/FK contact
+detector and refused to close when its conditions were not met. A real run then
+reported `DESCENT_NO_CONTACT` while the operator observed the fingers touching
+or pressing the table. The software did not confirm that physical contact and
+kept the jaws open. The synthetic tests had not established hardware behaviour.
 
-- Contact inference needs a sustained nearly stationary encoder/FK height while
-  the reference keeps descending. It also needs a preceding free downward
-  movement. Increasing lag while still descending is not enough.
-- Every kinematic joint must have fresh, calibrated, torque-enabled feedback
-  during descent. Updates from other motors cannot disguise a frozen reading.
-- The guarded path starts from measured angles and preserves the existing
-  initial servo reference. Its joint reference speed is bounded.
-- On contact inference, the controller first stops advancing its reference,
-  then backs off smoothly from the measured position by the existing 0.3 cm.
-  This replaces jumping to a nominal earlier waypoint followed by sag correction.
-- A search with no explicit closing height cannot close without contact evidence.
-  A stall before verified free descent reports `DESCENT_BLOCKED`; reaching the
-  search floor without evidence reports `DESCENT_NO_CONTACT`. Both leave jaws open.
-- Each pickup saves a JSON report in `config/local/grasp_runs/`, including failure
-  reports. The terminal prints the path; `/status` exposes the latest summary.
+This update restores `controller/arm/reach.py`, `controller/arm/click.py` and
+`controller/arm/arm.py` byte-for-byte to `a8ccb74`, including the friend's descent,
+backoff, sag compensation, jaw closing and lift. The experimental detector and
+its additional refusal are removed. Its file-based report wrapper is also
+removed; the friend's terminal/controller reports remain.
 
-The contact detector uses a 0.6 cm excess-lag threshold, a minimum 0.24-second
-observation window (longer for slow motion), no more than 0.10 cm height spread
-within that window, at least 0.30 cm command advance and two confirming samples.
-At least 0.25 cm of observed free descent must precede a contact inference.
-These are engineering starting values tested on synthetic feedback, not tuned
-or physically validated thresholds for this arm.
+Wrist-camera alignment was already enabled by default in the friend's branch;
+it was not introduced by `7cefa06`. For this step it is now explicitly opt-in:
+normal `grab_text.py` skips wrist detection, search and alignment movements.
+`--hand` enables the existing wrist path; `--no-hand` remains accepted.
+The standing-camera SAM path and the friend's 1 cm `--reach-out` default remain
+as they were, so this update does not simultaneously retune aiming or motion.
 
-## Try the normal pickup
+## Run this step
 
-In your existing working checkout of this branch:
+With the arm stationary, exit the old pickup program and stop the old controller.
+Keep Station running. From the existing Git checkout:
 
 ```bash
+cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
 git pull --ff-only
 ```
 
-Stop the old **arm controller** with Ctrl+C and restart it with your usual launch
-command. Keep Station running. Restart `grab_text.py` too; pulling files alone
-does not update running Python processes. Use follower **Self-controlled** and
-**Hold arm**, as before.
-
-From the repository root, using the same environment and calibration:
+Controller terminal, for this standing-camera-only test:
 
 ```bash
+cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm/controller"
+python3 -m arm.click --camera /dev/video4
+```
+
+The wrist camera can stay physically connected; this command does not open its
+video device. Existing calibration/settings are reused. In Station select
+follower **Self-controlled**, then press **Hold arm** on `http://localhost:8890`.
+`http://localhost:8890/status` should show `controller_build: friend-baseline-v1`.
+
+In another terminal:
+
+```bash
+cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
 .venv/bin/python -B grab_text.py --text "small white cylinder"
 ```
 
-This attempts a normal pickup. No `--close` or `--descent-only` flag is required.
-`--close` explicitly supplies a table-relative closing height; `--no-feel`
-disables guarded descent, so that mode does not exercise this fix.
+The first line should say **standing camera only; wrist alignment OFF**.
+This is a normal pickup using the friend's contact-based descent. No `--close`
+override is added. Preserve the existing camera/table calibration; do not press
+Reset for this update. If the arm again presses the table, stop the trial and
+report what happened rather than repeatedly attempting the same motion.
 
-The controller should identify itself as `feel-stop-v2` in
-`http://localhost:8890/status`. The client prints `Descent stop:` and the report
-path. If it misses, send that report and say whether it closed above, beside or
-around the object. The report contains no camera images or credentials.
+## Verification and remaining work
 
-## What is verified locally
+Local tests cover the standing-only default, explicit wrist opt-in, unchanged
+guarded-grab request fields, and exclusion of wrist calls from a normal pickup.
+The existing suite is run without Station, SAM inference or physical motion.
+A separate source comparison confirms the arm motion/controller files match
+the friend's baseline. Physical success still needs the next robot run.
 
-The full suite passes **122 tests**, with no Station connection or arm motion.
-The new regressions exercise:
-
-- A rising-lag trace that triggers the old detector while the simulated tip is
-  still descending; the new detector does not call it contact.
-- A sustained surface stop after free motion, and a brief pause that must not
-  count as contact.
-- The actual guarded-descent loop using synthetic encoder feedback, including
-  surface backoff, a blocked start, and one stale joint while the others update.
-- Keeping jaws open after an unsuccessful unknown-height search, and preserving
-  a structured failure report through the HTTP controller route.
-
-These tests do not run SAM inference, establish calibration accuracy or prove
-physical pickup success. The simulated surface and encoder model are synthetic.
-
-## Where we are and what remains
-
-This update addresses premature stopping. It does not add true depth sensing,
-change SAM segmentation, retune the gripper squeeze, or replace the friend's
-calibration. Encoders alone cannot distinguish table contact from another
-obstruction, servo weakness or mechanical binding. A physically inaccurate
-kinematic model can also report an incorrect fingertip height.
-
-Next, use the arm result to separate stopping errors from XY alignment errors.
-The current wrist-camera correction remains an approximate hover check, and the
-client still has the friend's default 1 cm `--reach-out` compensation. Its final
-wrist correction is not always re-observed before pickup. Those behaviours need
-separate measured validation; this change does not silently retune them.
-
-Reliable raised-surface pickup and hand/plate placement still require measured
-camera geometry and support height. Moving-hand delivery additionally requires
-tracking and a release check. SAM masks alone do not provide metric depth.
+Restoring the baseline does not establish accurate automatic height or guarantee
+that the gripper stops before pressing a surface. Its contact heuristic responds
+to joint tracking error, not a force sensor. First confirm the previous pickup
+behaviour is restored. Then improve the descent/closing point as one separate
+change using measured observations; add wrist guidance only in a later step.

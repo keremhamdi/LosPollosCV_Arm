@@ -1,0 +1,69 @@
+"""The normal pickup must not silently invoke wrist guidance. No robot I/O."""
+from contextlib import redirect_stdout, redirect_stderr
+import io
+import unittest
+from unittest.mock import Mock, patch
+
+from PIL import Image
+import grab_text as grab
+
+
+class CameraModeTests(unittest.TestCase):
+    def arguments(self, *flags):
+        with patch.object(grab, 'find_and_grab') as run, redirect_stdout(io.StringIO()):
+            grab.main(['--text', 'small white cylinder', *flags])
+        args, text = run.call_args.args
+        args.last_text = text
+        return args
+
+    def test_normal_command_defaults_to_standing_only(self):
+        args = self.arguments()
+        self.assertTrue(args.no_hand)
+        self.assertIsNone(args.close)
+        self.assertFalse(args.no_feel)
+        self.assertEqual(args.reach_out, 1.)  # existing friend's compensation
+
+    def test_wrist_guidance_requires_explicit_opt_in(self):
+        self.assertFalse(self.arguments('--hand').no_hand)
+        self.assertTrue(self.arguments('--no-hand').no_hand)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            grab.main(['--text', 'test', '--hand', '--no-hand'])
+
+    def perform_pick(self, args):
+        calls = []
+        def post(url, json, **kwargs):
+            calls.append((url, json))
+            return Mock(json=lambda: {'ok': True, 'x': 0., 'y': 25.})
+        with patch.object(grab.requests, 'post', side_effect=post), \
+                patch.object(grab.requests, 'get', return_value=Mock(json=lambda: {'log':'test'})), \
+                redirect_stdout(io.StringIO()):
+            close = args.close if args.close is not None else 1.5
+            grab.go(args, Image.new('RGB', (1280,720)), 500,500,'test',.8,close=close,above=14)
+        return calls
+
+    def test_normal_pick_never_calls_wrist_and_keeps_original_grab_fields(self):
+        args = self.arguments()
+        with patch.object(grab, 'hand_correct', side_effect=AssertionError('Wrist guidance forbidden')), \
+                patch.object(grab, 'find_in_hand', side_effect=AssertionError('Wrist SAM forbidden')), \
+                patch.object(grab, 'goto', side_effect=AssertionError('Wrist search movement forbidden')):
+            calls = self.perform_pick(args)
+        self.assertEqual([url.rsplit('/',1)[1] for url,_ in calls], ['click','grab'])
+        self.assertEqual(calls[-1][1], {'size':1280,'height':1.5,'above':14,'method':'top',
+                                      'guard':True,'feel_all_the_way':True,'x':0.,'y':26.})
+
+    def test_opt_in_reaches_existing_wrist_path(self):
+        args = self.arguments('--hand')
+        with patch.object(grab, 'hand_correct', return_value=(0.,25.)) as wrist:
+            self.perform_pick(args)
+        wrist.assert_called_once_with(args,'small white cylinder',0.,25.,None)
+
+    def test_explicit_height_still_uses_the_friends_bounded_grab_request(self):
+        args = self.arguments('--close','1')
+        calls = self.perform_pick(args)
+        self.assertTrue(calls[-1][1]['guard'])
+        self.assertEqual(calls[-1][1]['height'],1.)
+        self.assertNotIn('feel_all_the_way',calls[-1][1])
+
+
+if __name__ == '__main__':
+    unittest.main()

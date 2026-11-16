@@ -44,8 +44,6 @@ import logging
 import math
 import sys
 import time
-from datetime import datetime, timezone
-from uuid import uuid4
 from urllib.parse import parse_qs, urlparse
 
 from arm.arm import GRIPPER_ID, Arm, load_pose, save_pose
@@ -59,15 +57,6 @@ from target.gen_python.protobuf.drivers.inferences import normvla
 PORT = 8890
 CAMERA_FILE = REPO_ROOT / "calib" / "camera.json"
 QUEUE = "inference/normvla"
-GRASP_RUNS = REPO_ROOT.parent / 'config' / 'local' / 'grasp_runs'
-
-
-def save_grasp_report(report):
-    """Keep the failure as well as successful stop evidence; no camera/private data."""
-    GRASP_RUNS.mkdir(parents=True, exist_ok=True)
-    path = GRASP_RUNS / (report['run_id'] + '.json')
-    path.write_text(json.dumps(report, indent=2, allow_nan=False) + '\n')
-    return str(path)
 
 
 # ---------- pixel -> table position ----------
@@ -191,7 +180,6 @@ class App:
         self.pending = None      # arm position waiting for its click
         self.busy = False
         self.log = "Ready."
-        self.last_grasp_report = None
 
     def reach(self):
         if self.reacher is None:
@@ -288,7 +276,6 @@ class App:
         d["camera_role"] = self.camera_roles.get(self.camera.cam)
         d["observations"] = self.observations.snapshot(images=False)
         d["torque"] = all(j.torque for j in self.arm.joints.values())
-        d['last_grasp_report'] = self.last_grasp_report
         d["joints_raw"] = {str(i): (j.goal if j.torque else j.raw) for i, j in self.arm.joints.items()}
         return d
 
@@ -434,10 +421,7 @@ class App:
             self.busy = True
             self.log = f"Grabbing at x={x:.1f}, y={y:.1f}, closing {height:g} cm above the table..."
             side = request["method"] == "side"
-            report = {'run_id': datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ_') + uuid4().hex[:8],
-                      'controller_build': 'feel-stop-v2', 'target_cm': [x, y, height],
-                      'guard': bool(body.get('guard')), 'feel_all_the_way': bool(body.get('feel_all_the_way'))}
-            got, error = False, None
+            report = {}
             try:
                 if side:
                     got = await self.reach().grab_side(x, y, height, lift_cm=above - height, approach_h=above)
@@ -453,19 +437,9 @@ class App:
                     got = await self.reach().grab(x, y, height, above, **kw)
                 self.log = (f"Grabbed at x={x:.1f}, y={y:.1f}: holding it." if got
                             else f"Closed at x={x:.1f}, y={y:.1f} but nothing is in the gripper.")
-            except (RuntimeError, Unreachable, ValueError, KeyError) as exc:
-                error = str(exc)
-                self.log = 'Error: ' + error
             finally:
                 self.busy = False
-                report.update(holding=bool(got), error=error)
-                try:
-                    report['trace_path'] = save_grasp_report(report)
-                except (OSError, ValueError) as exc:
-                    report['trace_save_error'] = str(exc)
-                self.last_grasp_report = {k: v for k, v in report.items() if k != 'descent'}
-                self.last_grasp_report['stop_reason'] = report.get('descent', {}).get('stop_reason')
-            return {"ok": error is None, "error": error, "holding": bool(got), "method": request["method"],
+            return {"holding": bool(got), "method": request["method"],
                     "closing_angle_applied": False, "above_cm": above, "report": report}
         elif name == "save_park":
             pose = self.arm.percent()
