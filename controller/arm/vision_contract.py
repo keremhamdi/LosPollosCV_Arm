@@ -23,7 +23,7 @@ def width_fits(width, opening=GRIPPER_OPEN_CM, margin=JAW_MARGIN_CM):
 
 
 def capabilities():
-    return {"protocol_version": PROTOCOL_VERSION, "controller_build": "friend-baseline-v1", "methods": ["top", "side"],
+    return {"protocol_version": PROTOCOL_VERSION, "controller_build": "descent-taper-v1", "methods": ["top", "side"],
             "units": "cm", "gripper_open_cm": GRIPPER_OPEN_CM,
             "jaw_margin_cm": JAW_MARGIN_CM, "closing_angle_control": False,
             "observation_endpoint": "/observation", "structured_grab_result": True}

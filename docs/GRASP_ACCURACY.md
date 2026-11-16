@@ -1,58 +1,56 @@
-# Current step: planned grip height with standing and wrist guidance
+# Current pickup: tapered compensation and local wrist alignment
 
-Branch: `feel-grab-reachy`. Motion baseline: friend's commit `a8ccb74`.
-Running-controller identifier: **`friend-baseline-v1`** in `/status` capabilities.
-The height fix changes the pickup client's request, not the motor controller.
-It applies with either camera mode. Use `--hand` for the requested two-camera
-flow: standing-camera selection/localization, then optional wrist alignment,
-then descent to the planned closing height and close/lift.
+Branch: `feel-grab-reachy`. Running controller build: **`descent-taper-v1`**.
+Both standing and wrist guidance are enabled by default in `grab_text.py`.
+Use `--no-hand` only for an explicit standing-only comparison.
 
-## The one behaviour change in this update
+## What changed
 
-The supplied failed run contained a 1.5 cm closing height. The client also sent
-`feel_all_the_way: true`, which discarded that height and searched toward
--2.5 cm relative to the saved table plane. The normal client now omits that flag
-and keeps its planned closing height. For this request the target becomes
-**+1.5 cm instead of -2.5 cm**, avoiding an extra 4 cm of commanded descent.
+- Guarded descent preserves its initial servo reference, then tapers the previous
+  pose's sag compensation to zero at the closing-height endpoint. It does not
+  apply fresh sag-correction pulses just before closing. Existing settling and
+  blocked-joint relief remain. Joint reference speed is bounded.
+- Normal pickup retains its numeric closing height and needs a complete planned
+  descent. It does not require table contact to close. The separate below-table
+  touch/search tool may still return a partial path, now labelled as partial.
+- Wrist selection excludes matches more than a quarter image-width from the
+  expected object before comparing confidence. A second look crops around the
+  expected object using the same text prompt. It no longer substitutes an
+  arbitrary "small white object" when the requested object is missing.
+- Wrist corrections are limited to 2 cm per move, with at most five looks and
+  another observation after every correction. Lost or unconfirmed targets revert
+  to the standing aim. Confirmed wrist alignment skips the inherited extra 1 cm
+  outward offset. That offset remains for standing-only/fallback aiming.
+- Each controller grab writes a JSON report under `config/local/grasp_runs`,
+  including failures during motion. Reports contain the build, request, nominal
+  heights, compensated motor-target heights, measured encoder/FK heights and
+  shoulder compensation. Calibration files and motor gains are not changed.
 
-The friend's existing guarded descent can stop earlier on contact. Otherwise it
-finishes the reachable planned path and continues through the existing close-and-lift
-sequence. A partial path may end above the requested height. It does not require
-table contact to close. The requested height is in the calibrated model's
-coordinates, not a guarantee of physical fingertip clearance.
+## Evidence and verification
 
-The existing height policy remains: roughly half the estimated object height,
-clamped to 1.5–6 cm, or the existing **1.5 cm fallback** when height is unknown.
-`--close` remains an optional manual override. The terminal labels the height
-as estimated, fallback or manual. This change does not add metric depth.
+The supplied bottle report was from the older `feel-stop-v2` controller. Its
+nominal endpoint was -2.50 cm; replaying logged motor goals gave +0.36 cm, and
+its final measured model height was +0.84 cm. Reconstructing nominal IK identified
+a -57-step shoulder offset, consistent with carried-over hover compensation.
+This was not a truncated nominal path.
 
-See [the recorded-run analysis](REPORTED_DESCENT_ANALYSIS.md) for the evidence.
+The updated descent was exercised with the supplied geometry and inferred old
+compensation in three ideal-servo simulations. Requested heights of 1.5, 2.7
+and 2.0 cm produced motor-target heights of 1.529, 2.696 and 1.990 cm. These are
+software checks, **not measured physical accuracy**. Real load, calibration and
+motor response still need a physical test.
 
-## Why the last update was rolled back
+The offline suite passes **135 tests**, covering descent reference continuity,
+endpoint compensation, speed bounds, contact backoff, partial-path labelling,
+default camera mode, distant wrist detections, local crop coordinates, stale
+frames, target loss, correction limits, close/lift without contact, and report
+persistence on motion errors. SAM outputs and hardware feedback are mocked;
+no local robot or GPU inference was used.
 
-The `feel-stop-v2` update (`7cefa06`) introduced a stricter encoder/FK contact
-detector and refused to close when its conditions were not met. A real run then
-reported `DESCENT_NO_CONTACT` while the operator observed the fingers touching
-or pressing the table. The software did not confirm that physical contact and
-kept the jaws open. The synthetic tests had not established hardware behaviour.
+## Linux update and start
 
-This update restores `controller/arm/reach.py`, `controller/arm/click.py` and
-`controller/arm/arm.py` byte-for-byte to `a8ccb74`, including the friend's descent,
-backoff, sag compensation, jaw closing and lift. The experimental detector and
-its additional refusal are removed. Its file-based report wrapper is also
-removed; the friend's terminal/controller reports remain.
-
-Wrist-camera alignment was already enabled by default in the friend's branch;
-it was not introduced by `7cefa06`. For this step it is now explicitly opt-in:
-normal `grab_text.py` skips wrist detection, search and alignment movements.
-`--hand` enables the existing wrist path; `--no-hand` remains accepted.
-The standing-camera SAM path and the friend's 1 cm `--reach-out` default remain
-as they were, so this update does not simultaneously retune aiming or motion.
-
-## Run the two-camera pickup
-
-With the arm stationary, exit the old pickup program and stop the old controller.
-Keep Station running. From the existing Git checkout:
+With the arm stationary, stop the old pickup program and controller. Keep
+Station running. From the existing checkout:
 
 ```bash
 cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
@@ -61,7 +59,7 @@ git pull --ff-only
 git log -1 --oneline
 ```
 
-If Git reports local changes or a conflict, keep them; do not reset the checkout.
+If Git reports a conflict, preserve local changes; do not reset the checkout.
 Controller terminal:
 
 ```bash
@@ -69,75 +67,88 @@ cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm/controller"
 python3 -m arm.click --camera /dev/video4 --hand-camera /dev/video6
 ```
 
-These device paths are the ones used on the friend's laptop. Both cameras are
-opened; wrist alignment also needs the existing `controller/calib/hand.json`.
-Existing calibration/settings are reused. In Station select
-follower **Self-controlled**, then press **Hold arm** on `http://localhost:8890`.
-`http://localhost:8890/status` should show `controller_build: friend-baseline-v1`.
-
-In another terminal:
+Select follower **Self-controlled** in Station and **Hold arm** on the arm page
+at `http://localhost:8890`. Do not press the camera-calibration Reset button.
+Pickup terminal:
 
 ```bash
 cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
-.venv/bin/python -B grab_text.py --hand --text "small bottle"
+.venv/bin/python -u -B grab_text.py --hand 2>&1 | tee pickup_test.log
 ```
 
-Omit `--text "small bottle"` to keep the interactive `What now?` prompt.
-The first line should say **standing camera + wrist alignment ON**.
-Look for **Planned closing height:** and **Descent limit: planned closing height**.
-This is a normal pickup targeting that height, with an earlier contact stop possible. No
-`--close` override is added. Preserve the existing camera/table calibration; do not press
-Reset for this update. If the arm again presses the table, stop the trial and
-report what happened rather than repeatedly attempting the same motion.
+Type an object at `What now?`. It should print `Controller build: descent-taper-v1`
+and `standing camera + wrist alignment ON`. A confirmed wrist correction prints
+`wrist alignment confirmed; no extra outward offset`. If wrist detection is
+unavailable or uncertain, the terminal explicitly reports standing-camera fallback.
+Pulling does not update running Python processes; restart both programs.
 
-Pulling files does not update a running Python process. Restart both programs
-when switching from `feel-stop-v2`, including the pickup program that loaded
-SAM. Keep Station running. For standing-only comparison, omit the controller's
-`--hand-camera` argument and the pickup client's `--hand` flag.
+## A focused physical test within an hour
 
-## The bottle run that stopped above the table
+Use one isolated known object in a small central pickup patch. The supplied
+plane disagreed with one touch near the bottle by 1.6 cm; software cannot turn
+that into a correct physical measurement. Recheck the table before relying on
+the new height endpoint. Keep both camera mounts fixed.
 
-The supplied bottle log says `height estimate does not set the closing point`
-and ends with `DESCENT_NO_CONTACT`. Those messages belong to the superseded
-contact-required version, not the corrected client/controller pair. The image
-caption estimates a 4 cm bottle and a 2 cm closing height; the old request
-discarded that closing height. The corrected request retains it in both modes.
-That estimate is approximate, not a measured physical bottle height.
+With controller/pickup stopped, Station running, and the follower controlled by
+the leader in mirroring mode, back up and re-teach the local Z plane:
 
-`floor_reached_without_contact` in the old code only meant the planned movement
-ended without accepted contact. Its planner permits partial paths, so it could
-report that even when the requested floor was unreachable. It does not prove
-the fingers reached the table. The bottle run's report
-`config/local/grasp_runs/20261116T015937.767262Z_a627a04c.json` is needed to compare
-commanded and encoder/FK heights; it has not been supplied locally. Table/model
-error and incomplete reach remain possible explanations, not established causes.
+```bash
+cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm/controller"
+cp calib/table.json "calib/table.backup-$(date +%Y%m%d-%H%M%S).json"
+python3 -m arm.reach table
+```
 
-The 710 pixel wrist discrepancy was converted to 41.2 cm by the saved local
-camera calibration and rejected by the existing 8 cm limit. It is not a depth
-measurement. The arm kept the standing-camera aim plus its inherited 1 cm
-outward compensation. To inspect why wrist guidance disagreed, use the image
-`pick_views/hand_latest_0.jpg` from that run and the saved wrist calibration.
-Do not increase the correction limit to accept this discrepancy.
+Follow the four prompts: closed fingertips pointing down, barely touching the
+bare table at four corners around the intended pickup area. Do not press down.
+Then check an additional point in the middle, not one of the fitted corners:
 
-## Verification and remaining work
+```bash
+python3 -m arm.reach where
+```
 
-The full suite passes **120 tests**, including the JSON serialization boundary
-from the text client's request to the controller, retention of a numeric grip
-height, closing and lifting without table contact, varying estimated heights,
-and disabled wrist guidance. A new bottle regression checks the two-camera
-path with both a rejected 710 pixel correction and an accepted correction:
-the estimated 4 cm object retains a 2 cm numeric closing height through JSON
-routing, and the real controller's grab sequence closes/lifts with no contact
-reported by the mocked descent. The supplied earlier cylinder detector run
-was also replayed locally, reproducing its no-contact result.
+With a light touch there, the displayed height should be near zero. Aim for
+agreement within roughly 0.3 cm for the 2 cm test cylinder; this is a practical
+test target, not a software guarantee. If readings differ by a centimetre,
+investigate the touch/pose/calibration before another automatic pick. Exit
+`where` with Ctrl+C, then restart the controller, select Self-controlled and
+Hold arm. This teaches the Z plane; it does not recalibrate camera XY mapping.
 
-Tests run without Station, SAM inference or physical motion. A separate source
-comparison confirms the arm motion/controller files still match the friend's
-baseline. No motor gains, contact thresholds or calibration files are changed.
+For the known 2 cm cylinder only, a controlled first trial can use:
 
-The next physical test must confirm the fingers close around the object before
-table pressure. Model/table error, inaccurate size estimates, XY alignment and
-the outward compensation can still cause a miss. This fixes the discarded
-height request; it does not establish calibrated 3D accuracy or prove a physical
-grasp. Wrist guidance still uses approximate local calibration and discrete
-looks above the object; it does not continuously verify alignment during descent.
+```bash
+cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
+.venv/bin/python -u -B grab_text.py --hand --object-height 2 --text "small white cylinder" 2>&1 | tee pickup_test.log
+```
+
+Here `--object-height 2` supplies the cylinder's **measured 2 cm height**. Its
+closing height becomes 1 cm above the saved table plane. This isolates motion
+from the approximate RGB height estimate. For a short cap, measure its height
+in the intended picking orientation and supply that value in centimetres. With
+a measured height, the closing-height floor is 0.5 cm. Measured objects no taller
+than 0.5 cm are refused before motion; they need a validated lower fingertip
+clearance, not a guess from this script.
+
+Omit `--object-height` for automatic height selection. Its existing policy is
+half the RGB-estimated height, clamped to 1.5–6 cm; unknown height uses 1.5 cm.
+That automatic policy is not suitable for an unmeasured very thin cap. Neither
+policy supplies measured depth. `--close` remains a manual fingertip-height
+override, not a jaw-width command.
+
+Seek several consecutive successes in the same verified patch before expanding
+positions or changing objects. Always-correct pickup of arbitrary objects is
+not established: wrist alignment happens above the object, not continuously
+during descent, and this implementation does not derive calibrated depth from
+the two RGB cameras. Broader reliability needs measured 3D geometry, identity
+tracking and physical validation across object sizes and poses.
+
+## Send the result if it misses
+
+Keep the controller running and, before parking or another attempt, run:
+
+```bash
+cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
+.venv/bin/python -B collect_arm_debug.py
+```
+
+This performs read-only collection and creates a ZIP in Downloads. Transfer it
+to your computer and attach it in the chat. It does not upload automatically.

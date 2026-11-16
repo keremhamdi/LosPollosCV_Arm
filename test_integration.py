@@ -237,10 +237,15 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         inference = types.ModuleType("target.gen_python.protobuf.drivers.inferences")
         inference.normvla = Mock()
         with patch.dict(sys.modules, {"arm.station": station, inference.__name__: inference}), patch.object(sys, "path", [str(Path("controller").resolve()), *sys.path]):
-            cls.App = importlib.import_module("arm.click").App
+            cls.click_module = importlib.import_module("arm.click")
+            cls.App = cls.click_module.App
             cls.reach_module = importlib.import_module("arm.reach")
 
     def setUp(self):
+        self._report_writer_original = self.click_module.save_grasp_report
+        writer = patch.object(self.click_module, 'save_grasp_report', return_value='/tmp/test-grasp.json')
+        self.report_writer = writer.start()
+        self.addCleanup(writer.stop)
         self.arm = types.SimpleNamespace(joints={i: joint() for i in range(1, 9)},
                                          joint_updated_at={i: time.monotonic() for i in range(1, 9)})
         self.app = self.App(self.arm)
@@ -264,7 +269,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_normal_text_request_reaches_controller_with_numeric_grip_height(self):
         import grab_text
         with patch.object(grab_text, 'find_and_grab') as pick, redirect_stdout(io.StringIO()):
-            grab_text.main(['--text','small white cylinder'])
+            grab_text.main(['--text','small white cylinder','--no-hand'])
         args, args_text = pick.call_args.args
         args.last_text = args_text
         self.app.camera.locate = Mock(return_value=(3.66,28.84))
@@ -300,7 +305,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         reach.lift = AsyncMock()
         reach.descend_guarded = AsyncMock(return_value={'contact':False,'height_cm':1.5,'final_cm':1.5})
         result = await reach.grab(3.66,28.84,1.5,14.,guard=True)
-        reach.descend_guarded.assert_awaited_once_with(3.66,28.84,1.5)
+        reach.descend_guarded.assert_awaited_once_with(3.66,28.84,1.5,report={})
         reach.arm.close_gripper.assert_awaited_once()
         reach.lift.assert_awaited_once()
         self.assertTrue(result)
@@ -325,7 +330,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         for rejected, points, expected_xy in (
             (True, [(1270., 360.)], (-25.39, 23.81)),
-            (False, [(577.25, 360.), target], (-26.4, 23.8)),
+            (False, [(577.25, 360.), target], (-25.6, 23.2)),
         ):
             with self.subTest(rejected=rejected):
                 reach = self.reach_module.Reacher.__new__(self.reach_module.Reacher)
@@ -375,7 +380,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(wrist.call_count, len(points))
                 self.assertEqual(move.call_count, len(points))
                 self.assertEqual('not trusting it' in output.getvalue(), rejected)
-                reach.descend_guarded.assert_awaited_once_with(*expected_xy, 2.)
+                reach.descend_guarded.assert_awaited_once_with(*expected_xy, 2., report={})
                 reach.arm.close_gripper.assert_awaited_once()
                 reach.lift.assert_awaited_once()
 
@@ -398,6 +403,30 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await self.app.api("grab", {"x": 1, "y": 2, "z": 4, "above": 12})
         self.reacher.grab.assert_not_awaited()
+
+    async def test_motion_error_saves_report_and_releases_busy_flag(self):
+        self.reacher.grab.side_effect = RuntimeError('test motion failure')
+        with self.assertRaisesRegex(RuntimeError, 'test motion failure'):
+            await self.app.api('grab', {'x':1., 'y':25., 'height':2., 'above':14., 'guard':True})
+        report = self.report_writer.call_args.args[0]
+        self.assertEqual(report['error'], 'test motion failure')
+        self.assertEqual(report['controller_build'], 'descent-taper-v1')
+        self.assertEqual(report['target_cm'], [1.,25.,2.])
+        self.assertFalse(self.app.busy)
+
+    async def test_report_writer_persists_json_without_robot_io(self):
+        # The normal fixture patches the writer; use its original implementation.
+        writer = self.report_writer
+        self.assertFalse(writer.called)
+        module = self.click_module
+        with tempfile.TemporaryDirectory() as tmp, patch.object(module, 'REPO_ROOT', Path(tmp)/'controller'):
+            original = self._report_writer_original
+            with redirect_stdout(io.StringIO()):
+                filename = original({'controller_build':'descent-taper-v1', 'error':None,
+                                     'descent':{'samples':[{'target_cm':2.,'motor_target_cm':2.}]}})
+            saved = json.loads(Path(filename).read_text())
+            self.assertEqual(saved['descent']['samples'][0]['target_cm'], 2.)
+            self.assertIn('run_id', saved)
 
     async def test_status_exposes_active_plane_and_original_touches(self):
         self.reacher.table = self.reach_module.Table(.01, -.02, .03, [[.1, .2, .04]])

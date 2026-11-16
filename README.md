@@ -1,10 +1,10 @@
 # LosPollosCV_Arm
 
-**Active branch: `feel-grab-reachy`.** The arm's motion/controller files have been
-restored to the friend's commit `a8ccb74` after the `feel-stop-v2` change failed
-on the physical arm. `grab_text.py` now uses standing-camera guidance by default;
-wrist alignment requires `--hand`. Pickup honours its planned closing height
-instead of automatically searching below the table. To use **both cameras**,
+**Active branch: `feel-grab-reachy`. Controller build: `descent-taper-v1`.**
+The friend's pickup flow now tapers hover compensation to zero during descent,
+keeps the planned closing height, and uses standing + wrist guidance by default.
+Wrist matching excludes distant detections and verifies each small correction.
+To use **both cameras**,
 start the controller with `--camera /dev/video4 --hand-camera /dev/video6`
 and run `.venv/bin/python -B grab_text.py --hand` from the repository root. See
 [current status and test commands](docs/GRASP_ACCURACY.md).

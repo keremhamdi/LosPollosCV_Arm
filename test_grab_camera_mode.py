@@ -1,4 +1,4 @@
-"""The normal pickup must not silently invoke wrist guidance. No robot I/O."""
+"""Both-camera defaults and explicit standing-only comparison. No robot I/O."""
 from contextlib import redirect_stdout, redirect_stderr
 import io
 import unittest
@@ -16,14 +16,14 @@ class CameraModeTests(unittest.TestCase):
         args.last_text = text
         return args
 
-    def test_normal_command_defaults_to_standing_only(self):
+    def test_normal_command_defaults_to_both_cameras(self):
         args = self.arguments()
-        self.assertTrue(args.no_hand)
+        self.assertFalse(args.no_hand)
         self.assertIsNone(args.close)
         self.assertFalse(args.no_feel)
         self.assertEqual(args.reach_out, 1.)  # existing friend's compensation
 
-    def test_wrist_guidance_requires_explicit_opt_in(self):
+    def test_wrist_guidance_can_be_explicitly_disabled(self):
         self.assertFalse(self.arguments('--hand').no_hand)
         self.assertTrue(self.arguments('--no-hand').no_hand)
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -42,7 +42,7 @@ class CameraModeTests(unittest.TestCase):
         return calls
 
     def test_normal_pick_never_calls_wrist_and_honours_planned_height(self):
-        args = self.arguments()
+        args = self.arguments('--no-hand')
         with patch.object(grab, 'hand_correct', side_effect=AssertionError('Wrist guidance forbidden')), \
                 patch.object(grab, 'find_in_hand', side_effect=AssertionError('Wrist SAM forbidden')), \
                 patch.object(grab, 'goto', side_effect=AssertionError('Wrist search movement forbidden')):
@@ -58,7 +58,7 @@ class CameraModeTests(unittest.TestCase):
         wrist.assert_called_once_with(args,'small white cylinder',0.,25.,None)
 
     def test_explicit_height_still_uses_the_friends_bounded_grab_request(self):
-        args = self.arguments('--close','1')
+        args = self.arguments('--close','1','--no-hand')
         calls = self.perform_pick(args)
         self.assertTrue(calls[-1][1]['guard'])
         self.assertEqual(calls[-1][1]['height'],1.)
@@ -71,6 +71,23 @@ class CameraModeTests(unittest.TestCase):
                 close, above, _ = grab.grab_heights(args, None, (1280,720))
             self.assertEqual(close,expected)
             self.assertGreater(above,close)
+
+    def test_measured_height_overrides_bad_rgb_estimate_for_small_objects(self):
+        for height, expected in [(2.,1.), (1.,.5), (.6,.5), (4.,2.)]:
+            with self.subTest(height=height):
+                args = self.arguments('--object-height',str(height))
+                with patch.object(grab,'estimate_height',return_value=(.7,1.,None)):
+                    close, above, est = grab.grab_heights(args,None,(1280,720))
+                self.assertEqual(close,expected)
+                self.assertEqual(est[0],height)
+                self.assertGreater(above,close)
+
+    def test_unvalidated_sub_clearance_object_height_refuses_before_motion(self):
+        for height in ('.4','0','nan','inf'):
+            with self.subTest(height=height), redirect_stderr(io.StringIO()), \
+                    patch.object(grab,'find_and_grab') as pick, self.assertRaises(SystemExit):
+                grab.main(['--text','small black cap','--object-height',height])
+            pick.assert_not_called()
 
 
 if __name__ == '__main__':

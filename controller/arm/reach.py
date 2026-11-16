@@ -410,7 +410,7 @@ class Reacher:
 
     # ---------- going down by feel ----------
 
-    async def descend_guarded(self, x_cm, y_cm, floor_cm, speed=None, backoff=None):
+    async def descend_guarded(self, x_cm, y_cm, floor_cm, speed=None, backoff=None, report=None):
         """Straight down from where the tip is, slowly, towards floor_cm above the table, and stop at
         the first thing the gripper meets: the table under the fingertips, or the top of an object
         under the palm. Then lift off that by `backoff` cm and hold there.
@@ -424,10 +424,15 @@ class Reacher:
         Returns {"contact": bool, "height_cm": where it stopped by the arm's own reading, before lifting off,
                  "final_cm": where it holds now}."""
         arm = self.arm
+        report = report if report is not None else {}
+        report.update(requested_height_cm=floor_cm, samples=[], compensation='taper_to_zero')
         speed = speed or GUARD_SPEED_CM_S
         backoff = GUARD_BACKOFF_CM if backoff is None else backoff
         t = self.table
-        path = self.plan_line(x_cm, y_cm, floor_cm, partial=True, allow_below=True, step_cm=0.5)
+        # A normal pickup needs the complete closing-height path. Partial paths
+        # remain available only for the explicit below-table touch/search tool.
+        path = self.plan_line(x_cm, y_cm, floor_cm, partial=floor_cm < MIN_TIP_HEIGHT,
+                              allow_below=True, step_cm=0.5)
         ff = {m: arm.sag.get(m, 0) for m in IK_MOTORS}       # what the arm needs to hold itself up, from the last stop
         await arm.hold()
         cmd = IK_MOTORS + [7] if roll_raw() is not None else IK_MOTORS
@@ -435,6 +440,23 @@ class Reacher:
         heights = [h_from] + [t.height(self.tip(q)[0]) * 100 for q in path]            # told-to-be heights along the way
         start = {m: (arm.joints[m].goal if arm.joints[m].torque else arm.joints[m].raw) for m in cmd}
         true = [{m: start[m] - ff.get(m, 0) for m in cmd}] + [{m: self._raw(m, q[MOTOR_JOINTS[m]]) for m in cmd} for q in path]
+        n = len(true) - 1
+        # Hover compensation is pose-dependent: carrying the bottle run's -57
+        # shoulder steps all the way down raised its final motor target ~2.9 cm.
+        # Preserve the starting reference, then smoothly remove that old offset.
+        way = [{m: max(arm.joints[m].range_min, min(arm.joints[m].range_max,
+                    round(p[m] + ff.get(m, 0) * (1 - ease(i / n))))) for m in cmd}
+               for i, p in enumerate(true)]
+        base_angles = self.current_angles()
+
+        def command_height(goals):
+            angles = dict(base_angles)
+            angles.update({MOTOR_JOINTS[m]: self._angle(m, g) for m, g in goals.items()})
+            return t.height(self.tip(angles)[0]) * 100
+
+        command_heights = [command_height(p) for p in way]
+        report.update(start_sag_steps=ff, planned_endpoint_cm=heights[-1],
+                      final_motor_target_cm=command_heights[-1])
 
         def goals_at(f):
             i = min(len(true) - 2, int(f))
@@ -442,12 +464,13 @@ class Reacher:
             out = {}
             for m in cmd:
                 j = arm.joints[m]
-                v = true[i][m] + (true[i + 1][m] - true[i][m]) * u + ff.get(m, 0)
+                v = way[i][m] + (way[i + 1][m] - way[i][m]) * u
                 out[m] = int(max(j.range_min, min(j.range_max, round(v))))
             return out, heights[i] + (heights[i + 1] - heights[i]) * u
 
-        n = len(true) - 1
         total = max(0.2, (heights[0] - heights[-1]) / speed)
+        largest = max(abs(b[m] - a[m]) for a, b in zip(way, way[1:]) for m in cmd)
+        total = max(total, n * largest / MAX_JOINT_SPEED)
         t0, seen_t = time.monotonic(), None
         hist, over, contact, h_stop = [], 0, False, None
         while True:
@@ -459,6 +482,10 @@ class Reacher:
             if arm.last_update != seen_t:
                 seen_t = arm.last_update
                 h_is = self.state()[2]
+                report['samples'].append({'elapsed_s': round(el, 4), 'target_cm': h_told,
+                    'motor_target_cm': command_height(goals), 'tip_cm': list(self.state()[:3]),
+                    'joints_raw': {str(m): arm.joints[m].raw for m in MOTOR_JOINTS},
+                    'joints_command': {str(m): g for m, g in goals.items()}})
                 gap = h_is - h_told                      # how far above its told height the arm is
                 hist.append((el, gap))
                 if el > GUARD_BLANK_S:
@@ -476,21 +503,26 @@ class Reacher:
         if contact:
             # hold a little above where it met something: the point of the way down with that height
             want = h_stop + backoff
-            f = 0.0
+            f = float(min(range(n + 1), key=lambda i: abs(command_heights[i] - want)))
             for i in range(n):
-                if heights[i] >= want >= heights[i + 1]:
-                    f = i + (heights[i] - want) / max(1e-6, heights[i] - heights[i + 1])
+                if command_heights[i] >= want >= command_heights[i + 1]:
+                    f = i + (command_heights[i] - want) / max(1e-6, command_heights[i] - command_heights[i + 1])
                     break
             goals, _ = goals_at(f)
-            end = {m: goals[m] - ff.get(m, 0) for m in cmd}
             await arm._write([(m, GOAL_POSITION, g.to_bytes(2, "little")) for m, g in goals.items()])
-            await arm._settle_and_ease(end, True, aim=goals)
+            await arm._settle_and_ease(goals, False, aim=goals)
         else:
             end = true[-1]
             goals, _ = goals_at(float(n))
-            below = heights[-1] < MIN_TIP_HEIGHT      # was aiming under the table and never felt it
-            await arm._settle_and_ease(end, not below, aim=goals)
+            # Do not add a new blind shoulder push just before closing. Retain
+            # the friend's settling/blocked-joint relief, without extra sag pulses.
+            await arm._settle_and_ease(end, False, aim=goals)
             h_stop = self.state()[2]
+        report.update(contact=contact, final_cm=round(self.state()[2], 2),
+                      commanded_stop_height_cm=command_height(goals),
+                      stop_reason=('contact_inferred' if contact else
+                                   'partial_path_complete' if abs(heights[-1] - floor_cm) > .3 else 'planned_path_complete'),
+                      height_error_cm=round(self.state()[2] - floor_cm, 2))
         return {"contact": contact, "height_cm": round(h_stop, 2), "final_cm": round(self.state()[2], 2)}
 
     def plan(self, x_cm, y_cm, h_cm, tilt=None, line=False):
@@ -545,7 +577,9 @@ class Reacher:
             mid = min(above_h, max(GUARD_FROM_CM, plan_h + 2.0))
             if above_h - mid > 0.5:
                 await self.follow(self.plan_line(x_cm, y_cm, mid), max(1.0, (above_h - mid) / 6))
-            felt = await self.descend_guarded(x_cm, y_cm, grab_h if grab_h is not None else GUARD_FLOOR_CM)
+            report['descent'] = {}
+            felt = await self.descend_guarded(x_cm, y_cm, grab_h if grab_h is not None else GUARD_FLOOR_CM,
+                                               report=report['descent'])
             report.update(contact=felt["contact"], met_at_cm=felt["height_cm"], closed_at_cm=felt["final_cm"])
         else:
             down = self.plan_line(x_cm, y_cm, grab_h)

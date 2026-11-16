@@ -44,6 +44,8 @@ import logging
 import math
 import sys
 import time
+from datetime import datetime, timezone
+from uuid import uuid4
 from urllib.parse import parse_qs, urlparse
 
 from arm.arm import GRIPPER_ID, Arm, load_pose, save_pose
@@ -57,6 +59,21 @@ from target.gen_python.protobuf.drivers.inferences import normvla
 PORT = 8890
 CAMERA_FILE = REPO_ROOT / "calib" / "camera.json"
 QUEUE = "inference/normvla"
+
+
+def save_grasp_report(report):
+    """Local diagnostics only; a disk error must not hide a motion error."""
+    run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ') + '_' + uuid4().hex[:8]
+    folder = REPO_ROOT.parent / 'config' / 'local' / 'grasp_runs'
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / (run_id + '.json')
+        path.write_text(json.dumps({'run_id': run_id, **report}, indent=2) + '\n')
+        print('Grasp report:', path)
+        return str(path)
+    except OSError as exc:
+        print(f'Could not save grasp report: {exc}', file=sys.stderr)
+        return None
 
 
 # ---------- pixel -> table position ----------
@@ -421,7 +438,9 @@ class App:
             self.busy = True
             self.log = f"Grabbing at x={x:.1f}, y={y:.1f}, closing {height:g} cm above the table..."
             side = request["method"] == "side"
-            report = {}
+            report = {'controller_build': capabilities()['controller_build'],
+                      'target_cm': [x, y, height], 'request': body, 'error': None}
+            report_path = None
             try:
                 if side:
                     got = await self.reach().grab_side(x, y, height, lift_cm=above - height, approach_h=above)
@@ -437,10 +456,16 @@ class App:
                     got = await self.reach().grab(x, y, height, above, **kw)
                 self.log = (f"Grabbed at x={x:.1f}, y={y:.1f}: holding it." if got
                             else f"Closed at x={x:.1f}, y={y:.1f} but nothing is in the gripper.")
+                report['holding'] = bool(got)
+            except Exception as exc:
+                report['error'] = str(exc)
+                raise
             finally:
                 self.busy = False
+                report_path = save_grasp_report(report)
             return {"holding": bool(got), "method": request["method"],
-                    "closing_angle_applied": False, "above_cm": above, "report": report}
+                    "closing_angle_applied": False, "above_cm": above, "report": report,
+                    'report_path': report_path}
         elif name == "save_park":
             pose = self.arm.percent()
             save_pose("park", pose)
