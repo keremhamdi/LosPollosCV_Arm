@@ -14,6 +14,7 @@
   add --dry to only show what it found and where, without moving
   standing-camera guidance is the default; add --hand to enable wrist-camera corrections
   descent honours the planned closing height, with the existing contact stop as a backup
+  add --precise to try the careful aim for small objects (off by default; docs/PRECISE_AIM.md)
 
 Needs the arm page running WITHOUT --read-only, follower (Self-controlled), Hold arm pressed.
 The page's buttons keep working at the same time. Reading writing needs once: uv pip install easyocr
@@ -428,12 +429,34 @@ def main(argv=None):
     ap.add_argument("--no-feel", action="store_true",
                     help="don't feel for the table on the way down (the old way: trust the table's height)")
     ap.add_argument("--dry", action="store_true", help="find things and say where, never move")
+    ap.add_argument("--precise", action="store_true",
+                    help="try the careful aim for small objects (precise_grab.py): aims at the middle of where the "
+                         "object stands, retries a miss. Off by default; the arm's own motion is the same")
+    ap.add_argument("--tries", type=int, default=2,
+                    help="with --precise: grabs per request; after a miss it looks again and grabs again (default 2)")
+    ap.add_argument("--no-lens", action="store_true",
+                    help="with --precise: map pixels to the table exactly as the arm page does (no lens correction)")
+    ap.add_argument("--no-zoom", action="store_true",
+                    help="with --precise: don't take a second, enlarged look at small objects")
+    ap.add_argument("--min-close", type=float, default=0.8, metavar="CM",
+                    help="with --precise: small and flat things may be closed on this low above the table "
+                         "(default 0.8; 1.5 = the usual pickup's lowest)")
     a = ap.parse_args(argv)
     print('Pickup guidance: ' + ('standing camera only; wrist alignment OFF' if a.no_hand else
                                 'standing camera + wrist alignment ON'))
+    grab, setup_hand = find_and_grab, hand_calibrate
+    if a.precise:
+        import sys
+        import precise_grab
+        given = sys.argv[1:] if argv is None else argv
+        if not any(str(g) == "--reach-out" or str(g).startswith("--reach-out=") for g in given):
+            a.reach_out = None     # precise mode adds no reach-out unless asked (see docs/PRECISE_AIM.md)
+        grab, setup_hand = precise_grab.find_and_grab, precise_grab.hand_calibrate
+        print("Precise aim ON: middle of where the object stands, second look at small things, "
+              f"up to {max(1, a.tries)} grabs" + ("" if a.reach_out is None else f", reach-out {a.reach_out:g} cm"))
 
     if a.text or a.word:
-        return find_and_grab(a, a.text or a.word)
+        return grab(a, a.text or a.word)
     print("Type what to grab, or a command:" + __doc__.split("then type, e.g.:")[1].split("  .venv")[0].rstrip())
     while True:
         try:
@@ -452,7 +475,7 @@ def main(argv=None):
             elif words[0] == "trim":
                 trim(a)
             elif words[0] == "handcal":
-                hand_calibrate(a, " ".join(line.split()[1:]) or "small white cylinder")
+                setup_hand(a, " ".join(line.split()[1:]) or "small white cylinder")
             elif words[0] in ("rest", "park"):
                 print("(dry) would park") if a.dry else action(a, "park")
             elif words[0] in ("put", "place") and len(words) == 3:
@@ -465,7 +488,7 @@ def main(argv=None):
                     continue
                 put(a, *a.bring)
             else:
-                find_and_grab(a, line)
+                grab(a, line)
         except ValueError:
             print('Numbers please, e.g. "put -12 25".')
         except requests.RequestException as e:

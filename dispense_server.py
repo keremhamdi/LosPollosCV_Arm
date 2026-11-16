@@ -24,6 +24,10 @@ GET  /v1/last       the last request and result (for Family/debug)
 
 Basic on purpose: one bowl position you give, no slots, place_verified is always false
 (not checked yet), "actions" and "slot_hint" are accepted and ignored.
+
+  .venv/bin/python dispense_server.py --precise      # off by default: pick the careful way
+        (precise_grab.py: aim at the middle of where the object stands, close at a height planned
+        from the object instead of a fixed 5 cm, look again and retry after a miss; docs/PRECISE_AIM.md)
 """
 import argparse
 import io
@@ -37,9 +41,10 @@ try:
     from PIL import Image
 
     import grab_text as G
+    import precise_grab as P
     import target_selector_v5 as ts
 except ImportError:   # fine for --listen-only, which needs no camera or arm packages
-    np = requests = Image = G = ts = None
+    np = requests = Image = G = P = ts = None
 
 SCHEMA = "medicine_buddy.arm.v1"
 LOCK = threading.Lock()          # one dispense at a time
@@ -113,6 +118,38 @@ def locate(a, name, min_conf):
     return None
 
 
+LABELLED_THINGS = ["medicine", "medicine box", "blister pack", "bottle", "box", "object"]
+
+
+def grab_settings(a):
+    """precise_grab's settings (how it aims, goes down and tries again) from this server's options."""
+    return P.options(arm_url=a.arm_url, close=getattr(a, "precise_close", None), above=a.above,
+                     tries=getattr(a, "tries", 2), no_hand=not getattr(a, "hand", False),
+                     no_feel=getattr(a, "no_feel", False), reach_out=getattr(a, "reach_out", None),
+                     min_close=getattr(a, "min_close", P.LOW_CLOSE_CM))
+
+
+def locate_precise(a, kind, name, min_conf, near=None):
+    """--precise: the same search as locate() / locate_object(), but giving what precise_grab grabs:
+    (target, label, score, how), target = where the object stands on the table and its size.
+    Only things the arm can reach are returned."""
+    ga = grab_settings(a)
+    img = P.frame(ga)
+    tmap = P.table_map(ga, img.size)
+    if tmap is None:
+        raise RuntimeError("the fixed camera is not calibrated (the arm page needs 4 or more marks)")
+    look = a.meds.get(name.lower()) if kind == "dispense" else None
+    if look:
+        t, _ = P.find_by_look(ga, img, tmap, look, near)
+        return (t, name.upper(), t["score"], f"looks_like:{look}") if t else None
+    if kind == "dispense" and (a.read_labels or not a.meds):   # reading labels is slow: skipped with a --meds list
+        t = P.find_by_word(ga, img, tmap, name, min_conf, LABELLED_THINGS)
+        if t is not None:
+            return t, t["read"].upper(), t["read_confidence"], "label_read"
+    t, _ = P.find_by_look(ga, img, tmap, name, near)
+    return (t, name.upper() if kind == "dispense" else name, t["score"], "by_look") if t else None
+
+
 NOT_FOR_THE_ARM = {"knife", "knives", "scissors", "blade", "razor", "syringe", "needle", "hot", "boiling",
                    "weapon", "gun", "person", "people"}
 
@@ -171,8 +208,12 @@ def dispense(a, req, kind="dispense"):
         st = requests.get(a.arm_url + "/status", timeout=10).json()
         if st.get("read_only"):
             raise RuntimeError("arm controller is in read-only mode")
-        found = (locate(a, name, float(req.get("ocr_min_confidence", 0.65))) if kind == "dispense"
-                 else locate_object(a, name))
+        precise = bool(getattr(a, "precise", False))
+        min_conf = float(req.get("ocr_min_confidence", 0.65))
+        if precise:
+            found = locate_precise(a, kind, name, min_conf)
+        else:
+            found = (locate(a, name, min_conf) if kind == "dispense" else locate_object(a, name))
         if place == "handover":
             bowl = (a.handover[0], a.handover[1])
         elif a.bowl:
@@ -187,18 +228,34 @@ def dispense(a, req, kind="dispense"):
         if found is None:
             out.update(detect_detail="not_found", error=f"could not find {name}")
             return out
-        u, v, label, score, how = found
-        xy = page(a, "click", {"u": u, "v": v, "size": 1280})
+        if precise:
+            target, label, score, how = found
+            xy = {"x": round(target["x"], 1), "y": round(target["y"], 1)}
+        else:
+            u, v, label, score, how = found
+            xy = page(a, "click", {"u": u, "v": v, "size": 1280})
         out.update(label=label, score=round(score, 3),
                    detect_detail=f"{how} at x={xy.get('x')}, y={xy.get('y')} cm")
         if req.get("dry_run"):
             out.update(ok=True, final_state="aborted", detect_detail=out["detect_detail"] + " (dry_run: no motion)")
             return out
-        got = page(a, "grab", {"u": u, "v": v, "size": 1280, "height": a.close, "above": a.above, "method": "top"})
+        why = ""
+        if precise:   # go down by feel; after a miss look again and grab again (--tries)
+            def again(near):
+                refound = locate_precise(a, kind, name, min_conf, near)
+                return refound[0] if refound else None
+            got = P.grab_with_retries(grab_settings(a), target, again)
+            if not got["ok"]:
+                raise RuntimeError(got["error"] or "the arm refused the grab")
+            why = got["why"]
+            if got["attempts"] > 1:
+                out["detect_detail"] += f"; {got['attempts']} grabs"
+        else:
+            got = page(a, "grab", {"u": u, "v": v, "size": 1280, "height": a.close, "above": a.above, "method": "top"})
         if not got.get("holding"):
             page(a, "park")
             out.update(detect_detail=out["detect_detail"] + "; gripper closed on nothing",
-                       error="pick failed: nothing in the gripper")
+                       error="pick failed: " + (why or "nothing in the gripper"))
             return out
         page(a, "place", {"x": bowl[0], "y": bowl[1], "height": a.bowl_height, "above": a.above})
         page(a, "park")
@@ -267,7 +324,18 @@ def main():
     ap.add_argument("--listen-only", action="store_true",
                     help="no arm, no camera: receive Reachy's requests, show them, answer 'not connected'")
     ap.add_argument("--bowl-height", type=float, default=8.0, help="let go this high above the table, cm")
-    ap.add_argument("--close", type=float, default=5.0, help="close the jaws this high above the table, cm")
+    ap.add_argument("--close", type=float, default=None,
+                    help="close the jaws this high above the table, cm (default 5; with --precise: planned "
+                         "from the object's height)")
+    ap.add_argument("--precise", action="store_true",
+                    help="pick the careful way (precise_grab.py, docs/PRECISE_AIM.md). Off by default")
+    ap.add_argument("--hand", action="store_true", help="with --precise: centre the jaws with the gripper camera")
+    ap.add_argument("--tries", type=int, default=2, help="with --precise: grabs per request (default 2)")
+    ap.add_argument("--no-feel", action="store_true", help="with --precise: no contact stop on the way down")
+    ap.add_argument("--min-close", type=float, default=0.8, metavar="CM",
+                    help="with --precise: small and flat things may be closed on this low above the table (default 0.8)")
+    ap.add_argument("--reach-out", type=float, default=None, metavar="CM",
+                    help="with --precise: aim this many cm further from the base than measured")
     ap.add_argument("--above", type=float, default=14.0, help="approach / carry height, cm")
     ap.add_argument("--arm-url", default="http://localhost:8890")
     ap.add_argument("--host", default="0.0.0.0", help="0.0.0.0 = reachable from Buddy's laptop")
@@ -276,9 +344,16 @@ def main():
     if ts is None and not a.listen_only:
         ap.error("camera/arm packages are missing: pip install -r requirements.txt (or use --listen-only)")
     a.meds = load_meds(a.meds)
+    a.precise_close = a.close                 # --precise plans the closing height from the object unless --close is given
+    if a.close is None:
+        a.close = 5.0
+    if a.precise and P is not None:
+        P.OPEN_VIEWS = False                  # a server: save the pictures of what it found, don't pop them up
     if a.meds:
         print("Medicines:", ", ".join(f"{k} -> {v}" for k, v in a.meds.items()))
     where = f"bowl at {a.bowl[0]}, {a.bowl[1]}" if a.bowl else f"finds the '{a.bowl_text}' in the camera"
+    if a.precise:
+        where += "; PRECISE picking" + (" with the gripper camera" if a.hand else "")
     if a.listen_only:
         where = "LISTEN ONLY: nothing is looked for or moved"
     print(f"Medicine Buddy arm server on http://{a.host}:{a.port}  /v1/dispense  /v1/move_object  ({where})")
