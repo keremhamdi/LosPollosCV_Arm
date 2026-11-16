@@ -66,12 +66,26 @@ def load_meds(path):
     return meds
 
 
+def match_med(meds, name):
+    """What does this medicine look like? Buddy's name doesn't have to be written exactly as in meds.txt:
+    "Aspirin bottle", "aspirin 500mg" and "ASPIRIN" all find the "Aspirin" line. The longest matching
+    name wins, so "Aspirin Plus" beats "Aspirin" when both are listed."""
+    if not meds:
+        return None
+    n = " " + " ".join(name.lower().replace("-", " ").split()) + " "
+    exact = meds.get(name.lower().strip())
+    if exact:
+        return exact
+    hits = [(len(k), v) for k, v in meds.items() if (" " + k + " ") in n or k in name.lower().replace(" ", "")]
+    return max(hits)[1] if hits else None
+
+
 def locate(a, name, min_conf):
     """Find the medicine in the fixed camera. Returns (u, v, label, score, how).
     A name in --meds: look for what it looks like. Any other name: look for something that looks
     like the name itself; without --meds (or with --read-labels) first try reading it on a label."""
     img = Image.open(io.BytesIO(requests.get(a.arm_url + "/frame.jpg", timeout=10).content)).convert("RGB")
-    look = a.meds.get(name.lower())
+    look = match_med(a.meds, name)
     if look:
         ts.VLM_BACKEND = "none"
         res = ts.decide(img, look, None)

@@ -20,3 +20,4 @@ moves/
 .DS_Store
 pick_views/
 *.patch
+.venv

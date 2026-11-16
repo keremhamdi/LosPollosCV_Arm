@@ -305,10 +305,10 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         path = [{name: value for name in self.reach_module.MOTOR_JOINTS.values()} for value in (3001, 3101, 3102)]
         with patch.dict(globals_, {"time": types.SimpleNamespace(monotonic=lambda: next(ticks)),
                                   "asyncio": types.SimpleNamespace(sleep=AsyncMock()),
-                                  "roll_raw": lambda: None}):   # as on an arm without a saved wrist position
+                                  "roll_raw": lambda: None}):   # an arm without a saved wrist position
             await reach.follow(path, .2)
         for goals in sent:
-            self.assertEqual(set(goals), set(range(1, 7)))
+            self.assertEqual(set(goals), set(range(1, 7)))   # wrist roll (7) stays where it is
         self.assertEqual(sent[-1][1], 3102)
         self.assertLessEqual(max(abs(b-a) for a, b in zip([3000]+[s[1] for s in sent], [s[1] for s in sent])), 29)
 
@@ -337,6 +337,7 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         reacher = object.__new__(self.reach_module.Reacher)
         reacher.arm = types.SimpleNamespace(move=AsyncMock(), joints={8: types.SimpleNamespace(raw=10, raw_for=lambda p: 0)})
         reacher.pose_for = Mock(return_value=([{"q": 1}], 90))
+        reacher.roll_for = Mock(return_value=0.0)
         reacher.plan_swing = Mock(return_value=["swing"])
         reacher.plan_line = Mock(return_value=["line"])
         reacher.duration = lambda path: 1.0

@@ -45,14 +45,14 @@ POS_TOL = 0.003                  # 3 mm: a waypoint the solver can't reach this 
 DIR_TOL = 0.06                   # ~3.5 degrees
 STEP_CM = 1.0                    # path waypoint spacing
 MIN_TIP_HEIGHT = 0.5             # cm: lowest the fingertips may be asked to go
-MIN_BODY_HEIGHT = 1.5            # cm: lowest any wrist/forearm joint may go
+MIN_BODY_HEIGHT = 0.6            # cm: lowest any wrist/forearm joint may go
 CLEARANCE_CM = 5.0               # approach this far above an object's top
 MAX_AUTO_TILT = 80               # degrees: most the gripper may lean forward when chosen automatically
 BASE_Y_CM = 4.2                  # the base's turning axis sits at x=0, y=4.2 cm in the model
 SMALL_OBJECT_CM = 6.0            # below this: let the arm end a little low on the way down (no sag push-up)
 GUARD_SPEED_CM_S = 2.5           # going down by feel: this slowly
-GUARD_THRESH_CM = 0.6            # ... "met something" = the arm is this much higher than told, beyond its usual lag
-GUARD_BLANK_S = 0.45             # ... not judged during the first moment (the arm is still getting going)
+GUARD_THRESH_CM = 0.9            # ... "met something" = the arm is this much higher than told, beyond its usual lag
+GUARD_BLANK_S = 0.8              # ... not judged during the first moment (the arm is still getting going)
 GUARD_BACKOFF_CM = 0.3           # ... then lift off what it met by this much before closing
 GUARD_FROM_CM = 7.0              # ... starts feeling from this height (faster down to here)
 GUARD_FLOOR_CM = -2.5            # ... gives up this far below where the table is thought to be
@@ -468,7 +468,7 @@ class Reacher:
                         over += 1
                     else:
                         over = 0
-                    if over >= 2:
+                    if over >= 3:
                         contact, h_stop = True, h_is
                         break
             if s >= 1.0:
