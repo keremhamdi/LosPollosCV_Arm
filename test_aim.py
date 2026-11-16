@@ -454,6 +454,25 @@ class GrabFlowTests(unittest.TestCase):
             P.find_and_grab(self.a, "bottle cap")
         self.assertEqual(self.table.names(), ["grab"])
 
+    def test_putting_down_lets_go_where_it_was_gripped_not_from_a_fixed_height(self):
+        with patch.object(P, "_held", {}):
+            P.find_and_grab(self.a, "bottle cap")                # gripped 0.8 cm up
+            self.table.posts.clear()
+            P.put_down(self.a, -12.0, 25.0)
+            self.assertEqual(self.table.posts, [("place", {"x": -12.0, "y": 25.0, "height": 1.3, "above": 14.0})])
+            self.table.posts.clear()
+            P.put_down(self.a, -12.0, 25.0)                      # nothing held any more: the usual height
+            self.assertEqual(self.table.posts[0][1]["height"], 5.0)
+            P._held.update(close=4.0, above=17.0)                # a tall thing gripped 4 cm up: not pressed into the table
+            self.table.posts.clear()
+            P.put_down(self.a, 0.0, 20.0)
+            self.assertEqual((self.table.posts[0][1]["height"], self.table.posts[0][1]["above"]), (4.5, 17.0))
+            P._held.update(close=4.0, above=17.0)
+            self.a.put_height_given, self.a.put_height = True, 2.0
+            self.table.posts.clear()
+            P.put_down(self.a, 0.0, 20.0)
+            self.assertEqual(self.table.posts[0][1]["height"], 2.0)
+
     def test_without_a_park_pose_it_pulls_back_instead(self):
         self.table.miss_first, self.table.park_ok = 1, False
         P.find_and_grab(self.a, "bottle cap")

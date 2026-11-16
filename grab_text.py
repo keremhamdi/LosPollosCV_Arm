@@ -414,7 +414,9 @@ def main(argv=None):
     ap.add_argument("--word", help='grab the thing with this written on it, once, and exit')
     ap.add_argument("--arm-url", default="http://localhost:8890")
     ap.add_argument("--close", type=float, help="always close the jaws this high (cm); default: half the object's estimated height")
-    ap.add_argument("--put-height", type=float, default=5.0, help="let go this high above the table for put/bring, cm")
+    ap.add_argument("--put-height", type=float, default=5.0,
+                    help="let go this high above the table for put/bring, cm (default: where it was gripped plus "
+                         "0.5 cm, so it is set down, not dropped; with --basic: 5)")
     ap.add_argument("--above", type=float, default=14.0, help="approach and lift height, cm")
     ap.add_argument("--side", action="store_true", help="grab from the side instead of the top")
     ap.add_argument("--bring", nargs=2, type=float, metavar=("X", "Y"), help="hand-over spot for 'bring', cm")
@@ -447,7 +449,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     print('Pickup guidance: ' + ('standing camera only; wrist alignment OFF' if a.no_hand else
                                 'standing camera + wrist alignment ON'))
-    grab, setup_hand, precise_grab = find_and_grab, hand_calibrate, None
+    grab, setup_hand, precise_grab, place = find_and_grab, hand_calibrate, None, put
     a.precise = not a.basic
     if a.precise:
         import sys
@@ -456,6 +458,9 @@ def main(argv=None):
         if not any(str(g) == "--reach-out" or str(g).startswith("--reach-out=") for g in given):
             a.reach_out = None     # no fixed reach-out unless asked: aim check, or the retry's guess (docs/PRECISE_AIM.md)
         grab, setup_hand = precise_grab.find_and_grab, precise_grab.hand_calibrate
+        # put/bring: let go at the height it was gripped at (gentle), unless --put-height says otherwise
+        a.put_height_given = any(str(g) == "--put-height" or str(g).startswith("--put-height=") for g in given)
+        place = precise_grab.put_down
         print("Careful aim ON (--basic turns it off): middle of where the object stands, second look at small "
               f"things, up to {max(1, a.tries)} grabs" + ("" if a.reach_out is None else f", reach-out {a.reach_out:g} cm"))
     else:
@@ -492,14 +497,14 @@ def main(argv=None):
             elif words[0] in ("rest", "park"):
                 print("(dry) would park") if a.dry else action(a, "park")
             elif words[0] in ("put", "place") and len(words) == 3:
-                put(a, float(words[1]), float(words[2]))
+                place(a, float(words[1]), float(words[2]))
             elif words[0] == "bring":
                 if len(words) == 3:
                     a.bring = [float(words[1]), float(words[2])]
                 if not a.bring:
                     print('Where should I bring it? Type e.g. "bring -20 15" once (table x y in cm).')
                     continue
-                put(a, *a.bring)
+                place(a, *a.bring)
             else:
                 grab(a, line)
         except ValueError:

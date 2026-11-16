@@ -366,6 +366,13 @@ def grab_with_retries(a, t, find_again, tries=None):
             _session["reach"] = res["reach"]     # this guess got it: start with it from now on
             print(f"  Got it with {res['reach']:g} cm extra reach, so the next grabs start with that. "
                   'To measure it instead of guessing, type "aimcheck <object>" once.')
+        _held.clear()
+        if res["holding"]:      # remember where the jaws closed (what the arm measured, if it says), for putting it down
+            rep = res.get("report") or {}
+            tip = rep.get("tip_cm") or []
+            at = rep.get("closed_at_cm", tip[2] if len(tip) == 3 else None)
+            _held.update(close=max(FLOOR_CLOSE_CM, float(at)) if isinstance(at, (int, float)) else res["close"],
+                         above=res["above"])
         if a.dry or res["holding"] or not res["ok"] or n == tries:
             break
         print(f"Didn't get it: {res['why']}. Looking again (try {n + 1} of {tries})...")
@@ -378,6 +385,31 @@ def grab_with_retries(a, t, find_again, tries=None):
             break
         t = again
     return res
+
+
+PLACE_ABOVE_GRIP_CM = 0.5   # putting down: let go with the fingertips this far above where they closed on it
+_held = {}                  # the last successful grab: where the jaws closed, to put the object down as gently
+
+
+def put_down(a, x, y):
+    """Put the held object down at table x, y without dropping or pressing it: the fingertips go
+    back to the height they closed at when they picked it up (its base is then on the table again),
+    plus a few millimetres, and the jaws open there. --put-height given: that height instead."""
+    asked = getattr(a, "put_height_given", False)
+    if asked or not _held:
+        height, why = a.put_height, ("--put-height" if asked else "nothing known about what is held")
+    else:
+        height, why = round(_held["close"] + PLACE_ABOVE_GRIP_CM, 1), f"it was gripped {_held['close']:g} cm up"
+    above = max(a.above, _held.get("above", a.above), height + 3.0)
+    if a.dry:
+        print(f"(dry) would put it down at x={x}, y={y}, letting go {height:g} cm above the table ({why})")
+        return
+    print(f"Putting it down at x={x:g}, y={y:g}: letting go with the fingertips {height:g} cm above the table ({why})")
+    r = requests.post(a.arm_url + "/api/place", json={"x": x, "y": y, "height": height, "above": above}, timeout=180).json()
+    if r.get("ok"):
+        _held.clear()
+    log = requests.get(a.arm_url + "/status", timeout=10).json().get("log", "")
+    print(("OK: " if r.get("ok") else "Failed: ") + (r.get("error") or log))
 
 
 def find_and_grab(a, text, tries=None):
