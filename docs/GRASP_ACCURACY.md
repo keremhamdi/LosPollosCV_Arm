@@ -1,6 +1,6 @@
 # Current pickup: automatic small-object profiles and both cameras
 
-Branch: `feel-grab-reachy`. Pickup build: **`fine-centering-v3`**.
+Branch: `feel-grab-reachy`. Pickup build: **`fine-centering-v3.1`**.
 Running controller build: **`descent-taper-v1`**.
 Both standing and wrist guidance are enabled by default in `grab_text.py`.
 Use `--no-hand` only for an explicit standing-only comparison.
@@ -85,7 +85,7 @@ and 2.0 cm produced motor-target heights of 1.529, 2.696 and 1.990 cm. These are
 software checks, **not measured physical accuracy**. Real load, calibration and
 motor response still need a physical test.
 
-The offline suite passes **159 tests**, covering descent reference continuity,
+The offline suite passes **165 tests**, covering descent reference continuity,
 endpoint compensation, speed bounds, contact backoff, partial-path labelling,
 default camera mode, distant wrist detections, local crop coordinates, stale
 frames, target loss, correction limits, close/lift without contact, and report
@@ -102,6 +102,9 @@ confirmation without extra motion, jitter, repeated frames, target loss and
 the final observation limit. A client-to-controller test verifies the corrected
 cap XY, retained 0.5 cm height and saved alignment evidence. Bottle and accepted
 upright-cylinder tests retain their previous centering behaviour.
+Result-reporting tests distinguish a completed request from a detected hold,
+prioritize slip/failure evidence, preserve uncertainty for missing or conflicting
+results, and verify the actual terminal path without an additional status poll.
 
 ## Linux update and start
 
@@ -134,7 +137,7 @@ cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
 
 Type `small white cylinder` at `What now?`, whether it is upright or sideways.
 On another attempt type `small black cap`. No `--close` or `--object-height`
-is needed. Startup should print `Pickup build: fine-centering-v3` and
+is needed. Startup should print `Pickup build: fine-centering-v3.1` and
 `standing camera + wrist alignment ON`; each request should print
 `Controller build: descent-taper-v1`, `Automatic profile: ...; closing at ... cm`
 and `Height decision: ...` explaining the chosen height or fallback.
@@ -144,6 +147,25 @@ unavailable or uncertain, the terminal explicitly reports standing-camera fallba
 Pulling does not update running Python processes.
 This update changes the pickup client and diagnostics only. If the controller
 already reports `descent-taper-v1`, restarting the pickup client is sufficient.
+
+## How to tell whether the pickup succeeded
+
+Watch the object after the lift: it must be off the table and remain between
+the claws. The controller infers a hold from gripper encoder behaviour and,
+for the normal top-pick flow, checks for a detected slip after lifting. This
+does not visually verify the object's identity or continued retention later.
+
+The terminal now prints one outcome directly from the pickup response:
+
+- `HOLD DETECTED`: gripper feedback reports a hold; visually confirm the object.
+- `MISSED`: the motion completed but holding was not confirmed.
+- `SLIPPED`: feedback suggests the object was lost during the lift.
+- `FAILED`: the controller reported an execution error.
+- `UNCONFIRMED`: holding evidence is missing or contradictory.
+
+Older clients could print `OK` when `ok: true` accompanied `holding: false`.
+That prefix only described request completion and was misleading for pickup
+success. This reporting correction changes no motion or gripper thresholds.
 
 ## First physical test and remaining calibration limit
 

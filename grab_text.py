@@ -29,7 +29,7 @@ from PIL import Image
 import target_selector_v5 as ts
 import small_object_grasp as small_grasp
 
-PICKUP_BUILD = 'fine-centering-v3'
+PICKUP_BUILD = 'fine-centering-v3.1'
 
 
 def base_pixel(mask):
@@ -885,6 +885,29 @@ GRIPPER_OPEN_CM = 5.1    # jaw gap when fully open (100 %)
 SQUEEZE_CM = 1.0         # close the jaws this much narrower than the object: holds without crushing
 
 
+def pickup_outcome(response):
+    """Separate request completion from the controller's gripper evidence.
+
+    Holding is an encoder-based heuristic; this does not visually identify or
+    verify the lifted object. Never interpret a missing result as success.
+    """
+    report = response.get('report') or {}
+    error = response.get('error') or report.get('error')
+    if response.get('ok') is not True or error:
+        return 'FAILED', str(error or 'Controller did not confirm completion of the pickup attempt.')
+    if report.get('slipped') is True:
+        return 'SLIPPED', 'Gripper feedback suggests the object was lost during the lift.'
+    evidence = [value for value in (response.get('holding'), report.get('holding'))
+                if type(value) is bool]
+    if not evidence:
+        return 'UNCONFIRMED', 'The controller supplied no holding result; check the object visually.'
+    if len(set(evidence)) > 1:
+        return 'UNCONFIRMED', 'Controller holding results disagree; check the object visually.'
+    if evidence[0]:
+        return 'HOLD DETECTED', 'Gripper feedback reports a hold. Check that the requested object lifted with the claws.'
+    return 'MISSED', 'The attempt finished, but gripper feedback did not confirm a held object.'
+
+
 def go(a, img, u, v, what, score, close=None, above=None, est=None, aim=None):
     profile = small_grasp.profile_for(getattr(a,'last_text',''))
     decision = getattr(a, 'height_decision', None)
@@ -968,10 +991,8 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None, aim=None):
               f"(planned {close:g} cm), without an early contact stop")
     if rep.get("jaws_gap_cm") is not None:
         print(f"  jaws closed to {rep['jaws_gap_cm']} cm")
-    if rep.get("slipped"):
-        print("  it had it, but lost it on the way up")
-    log = requests.get(a.arm_url + "/status", timeout=10).json().get("log", "")
-    print(("OK: " if r.get("ok") else "Failed: ") + (r.get("error") or log))
+    state, detail = pickup_outcome(r)
+    print(f'{state}: {detail}')
 
 
 if __name__ == "__main__":
