@@ -1,5 +1,9 @@
 # LosPollosCV_Arm
 
+Continuing this project with another LLM? Read or paste
+[CONTINUE_HERE.txt](CONTINUE_HERE.txt): branch, working behaviour, unresolved
+sideways-cylinder/cap centring, evidence, and Linux commands.
+
 **Active branch: `feel-grab-reachy`. Pickup build: `fine-centering-v3.1`.
 Controller build: `descent-taper-v1`.**
 The friend's pickup flow now tapers hover compensation to zero during descent,
