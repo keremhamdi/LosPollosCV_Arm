@@ -55,6 +55,7 @@ GUARD_THRESH_CM = 0.6            # ... "met something" = the arm is this much hi
 GUARD_BLANK_S = 0.45             # ... not judged during the first moment (the arm is still getting going)
 GUARD_BACKOFF_CM = 0.3           # ... then lift off what it met by this much before closing
 GUARD_FROM_CM = 7.0              # ... starts feeling from this height (faster down to here)
+LOWER_MAX_CM = 2.0               # most a grab request may ask to go down beyond where its descent ended
 GUARD_FLOOR_CM = -2.5            # ... gives up this far below where the table is thought to be
 MAX_JOINT_SPEED = 700            # peak continuous reference steps/s (~60 deg/s), before integer rounding
 STEPS_PER_RAD = 4096 / (2 * math.pi)
@@ -518,7 +519,7 @@ class Reacher:
                               f"(needs {JAW_MARGIN_CM:g} cm to spare). Pick a narrower object or a narrower part of it.")
 
     async def grab(self, x_cm, y_cm, grab_h=4.0, above_h=12.0, open_pct=100.0, close_pct=0.0, confirm=None,
-                   object_h=None, guard=False, report=None):
+                   object_h=None, guard=False, report=None, lower=0.0):
         """Pick up whatever stands at x, y: open, go above, straight down, close, straight up.
 
         grab_h is how high above the table the fingertips are when they close.
@@ -557,6 +558,16 @@ class Reacher:
             # small: the push the arm needed hovering above (sag) is added to the way down from the start
             await self.follow(down, max(1.5, (above_h - grab_h) / 5), correct_sag=not small,
                               feedforward=small)   # about 5 cm/s
+        if lower and lower > 0:
+            # Asked for by the caller only ("lower" in the grab request; nothing changes without it):
+            # wherever the descent ended, go straight down this much more, slowly, and close there.
+            # No pull-up afterwards. For when the jaws end a little above small things because the
+            # table lies lower than the saved plane says.
+            here = self.table.height(self.tip(self.current_angles())[0]) * 100
+            extra = self.plan_line(x_cm, y_cm, here - min(float(lower), LOWER_MAX_CM), partial=True,
+                                   allow_below=True, step_cm=0.25)
+            await self.follow(extra, max(0.8, float(lower) / 1.5), correct_sag=False)
+            report["lowered_cm"] = round(here - self.state()[2], 2)
         mx, my, mh, _ = self.state()                 # where the encoders say the tip ended up
         report.update(tip_cm=[round(mx, 2), round(my, 2), round(mh, 2)],
                       tip_off_cm=round(math.hypot(mx - x_cm, my - y_cm), 2))

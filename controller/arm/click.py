@@ -430,6 +430,8 @@ class App:
                     cp = body.get("close_pct")       # how far the jaws close (% open): just under its width
                     kw = dict(object_h=float(oh) if oh is not None else None,
                               close_pct=max(0.0, min(100.0, float(cp))) if cp is not None else 0.0)
+                    if body.get("lower"):            # this much further down before closing (cm), on request only
+                        kw.update(lower=max(0.0, min(2.0, float(body["lower"]))), report=report)
                     if body.get("guard"):            # the last part of the way down by feel
                         kw.update(guard=True, report=report)
                         if body.get("feel_all_the_way"):

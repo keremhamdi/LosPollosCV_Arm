@@ -444,6 +444,9 @@ def main(argv=None):
     ap.add_argument("--min-close", type=float, default=0.8, metavar="CM",
                     help="small and flat things may be closed on this low above the table "
                          "(default 0.8; 1.5 = the basic pickup's lowest)")
+    ap.add_argument("--lower", type=float, default=0.0, metavar="CM",
+                    help="after going down, go this much further down before closing (0 to 2 cm). For when the jaws "
+                         "close a little above small things. Needs the arm page restarted from this branch")
     ap.add_argument("--no-touch", action="store_true",
                     help="don't go down to touch the table for flat and very low things; keep to the planned height")
     ap.add_argument("--feel-small", action="store_true",

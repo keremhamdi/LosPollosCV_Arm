@@ -47,7 +47,7 @@ def options(**settings):
     """Settings for the functions here, as the command line would give them (for other programs)."""
     base = dict(arm_url="http://localhost:8890", close=None, above=14.0, side=False, no_hand=True,
                 reach_out=None, tries=2, no_lens=False, no_zoom=False, no_feel=False, dry=False,
-                min_close=LOW_CLOSE_CM, feel_small=False, no_touch=False, put_height=5.0, bring=None)
+                min_close=LOW_CLOSE_CM, feel_small=False, no_touch=False, lower=0.0, put_height=5.0, bring=None)
     base.update(settings)
     return argparse.Namespace(**base)
 
@@ -1011,6 +1011,10 @@ def grab_target(a, t, descent=None):
             gx, gy = np.array([gx, gy]) + G.arm_frame(gx, gy) @ np.array(shift, float)
             print(f"  aiming {shift[0]:+.1f} cm out" + (f", {shift[1]:+.1f} cm left" if abs(shift[1]) > 1e-6 else "")
                   + f" ({why}): x={gx:.1f}, y={gy:.1f}")
+    lower = float(getattr(a, "lower", 0.0) or 0.0)
+    if lower > 0 and not a.side:
+        body["lower"] = round(min(lower, 2.0), 2)   # after the descent, this much further down before closing
+        print(f"  then {body['lower']:g} cm further down before closing (--lower)")
     body["x"], body["y"] = round(float(gx), 2), round(float(gy), 2)
     if h:
         body["object_height"] = round(h, 1)   # the arm starts feeling above it, and handles small and big differently
@@ -1022,6 +1026,10 @@ def grab_target(a, t, descent=None):
     elif "contact" in rep:
         print(f"  descent ended at model height {rep.get('closed_at_cm', '?')} cm (planned {close:g} cm), "
               "without an early contact stop")
+    if rep.get("lowered_cm") is not None:
+        print(f"  went {rep['lowered_cm']} cm further down before closing")
+    elif body.get("lower"):
+        print("  NOT lowered: the arm page running is an older one. Stop it and start it again.")
     if rep.get("jaws_gap_cm") is not None:
         print(f"  jaws closed to {rep['jaws_gap_cm']} cm")
     if rep.get("slipped"):

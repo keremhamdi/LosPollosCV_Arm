@@ -73,6 +73,15 @@ Simulation: a 3 cm bottle cap is aimed at within 0.02 to 0.13 cm (basic aim: abo
 the corrected aim ends within 0.1 to 0.6 cm (three camera mounts tried), against
 2.6 to 6.7 cm at leaning spots without the lean correction.
 
+## If the jaws still close a little too high: `--lower`
+
+`--lower 0.5` makes the arm go 0.5 cm further straight down after its normal descent,
+slowly and without pulling back up, and close there (0 to 2 cm). This is the **one
+addition to `controller/`** on this branch: `reach.py` and `click.py` take a `lower`
+field in the grab request and do nothing different without it. The arm page must be
+restarted from this branch; it then reports `friend-baseline-v1+lower`. Start with
+0.3 to 0.5 and watch for the fingertips pressing the table.
+
 ## Options
 
 `--basic` the previous pickup. `--tries N` grabs per request. `--min-close CM`

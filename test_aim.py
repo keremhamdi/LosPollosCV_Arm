@@ -12,7 +12,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 from PIL import Image
@@ -518,6 +518,14 @@ class GrabFlowTests(unittest.TestCase):
         P.find_and_grab(self.a, "small white cylinder")
         self.assertEqual(how(), [0.8, "touch"])                                   # a height that got nothing -> by touch
 
+    def test_lower_is_only_sent_when_asked_for(self):
+        P.find_and_grab(self.a, "bottle cap")
+        self.assertNotIn("lower", self.table.posts[0][1])
+        self.table.posts.clear()
+        P.find_and_grab(P.options(arm_url="http://arm.invalid", lower=0.5), "bottle cap")
+        self.assertEqual(self.table.posts[0][1]["lower"], 0.5)
+        self.assertIn("older one", sys.stdout.getvalue())    # this pretend arm page doesn't report having lowered
+
     def test_putting_down_lets_go_where_it_was_gripped_not_from_a_fixed_height(self):
         with patch.object(P, "_held", {}):
             P.find_and_grab(self.a, "bottle cap")                # gripped 0.8 cm up
@@ -795,6 +803,46 @@ class ServerTests(unittest.TestCase):
         self.a.meds = {"aspirin": "green vase"}
         out = self.ask()
         self.assertEqual((out["ok"], out["detect_detail"], self.table.posts), (False, "not_found", []))
+
+
+class LowerTests(unittest.IsolatedAsyncioTestCase):
+    """The one addition to the arm page: on request, go a little further down before closing."""
+
+    async def grab(self, **kw):
+        _, reach = controller()
+        r = reach.Reacher.__new__(reach.Reacher)
+        r.arm = types.SimpleNamespace(move=AsyncMock(), close_gripper=AsyncMock(return_value=(True, 40.0)),
+                                      gripper_still_holding=lambda: True)
+        self.lines, self.follows = [], []
+        r.pose_for = lambda x, y, heights, tilt=None: ([{}, {}], 0)
+        r.plan_swing = lambda q, h: ["swing"]
+        r.plan_line = lambda x, y, h, **k: self.lines.append((round(h, 2), k)) or ["line"]
+        r.duration = lambda path: 1.0
+
+        async def follow(path, seconds, **k):
+            self.follows.append(k)
+        r.follow, r.lift = follow, AsyncMock()
+        r.table = types.SimpleNamespace(height=lambda p: 0.008)      # the tip is 0.8 cm above the table
+        r.tip = lambda q: ((0, 0, 0), None, None)
+        r.current_angles = lambda: {}
+        r.state = lambda: (1.0, 20.0, 0.3, 0.0)
+        report = {}
+        await r.grab(1.0, 20.0, 0.8, 14.0, object_h=1.4, report=report, **kw)
+        return report
+
+    async def test_without_the_request_the_descent_is_as_it_was(self):
+        report = await self.grab()
+        self.assertEqual([h for h, _ in self.lines], [0.8])
+        self.assertNotIn("lowered_cm", report)
+
+    async def test_with_it_the_jaws_go_that_much_lower_without_a_pull_up(self):
+        report = await self.grab(lower=0.5)
+        self.assertEqual([h for h, _ in self.lines], [0.8, 0.3])
+        self.assertTrue(self.lines[1][1]["allow_below"])
+        self.assertEqual(self.follows[-1], {"correct_sag": False})
+        self.assertEqual(report["lowered_cm"], 0.5)
+        await self.grab(lower=9.0)                                    # never more than 2 cm
+        self.assertEqual(self.lines[-1][0], -1.2)
 
 
 if __name__ == "__main__":
