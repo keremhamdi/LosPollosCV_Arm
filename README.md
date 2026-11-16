@@ -1,5 +1,12 @@
 # LosPollosCV_Arm
 
+**Working branch: `feel-grab-reachy`.** The friend's current pickup path is
+`grab_text.py` -> `controller/arm/click.py` -> `controller/arm/reach.py`.
+The `feel-stop-v2` update addresses premature closing during guarded descent.
+See [current arm changes, test results and next steps](docs/GRASP_ACCURACY.md).
+The older integration workflow documented below uses `text_pick.py`; its
+limitations are not a description of every feature in the friend's controller.
+
 Text-prompted object detection, segmentation and grasp proposals for an ElRobot
 with **two continuously connected cameras: one fixed standing camera and one
 mounted on the gripper**. Combines [Robot_Vision](https://github.com/keremhamdi/Robot_Vision)

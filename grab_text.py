@@ -690,8 +690,12 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None):
     close = close if close is not None else (a.close if a.close is not None else 3.0)
     above = above if above is not None else a.above
     h, width, center = est if est else (None, None, None)
-    kind = ("small: ends a little low going down" if h < 6 else "big: holds the exact height going down") if h else "size unknown: treated as small"
-    print((f"About {h:.1f} cm tall ({kind}): " if h else f"({kind}) ") + f"closing the jaws {close} cm above the table, coming from {above} cm")
+    feeling = not a.side and not a.no_feel
+    if feeling and a.close is None:
+        print(f'Descending from {above:g} cm until sustained contact evidence; height estimate does not set the closing point.')
+    else:
+        print((f'Estimated height {h:.1f} cm. ' if h else 'Height unknown. ') +
+              f'Requested closing height {close:g} cm, approach {above:g} cm.')
     if a.dry:
         return
     body = {"u": u, "v": v, "size": img.width, "height": close, "above": above,
@@ -726,8 +730,12 @@ def go(a, img, u, v, what, score, close=None, above=None, est=None):
         print(f"About {width:.1f} cm wide.")
     r = requests.post(a.arm_url + "/api/grab", json=body, timeout=240).json()
     rep = r.get("report") or {}
+    if rep.get('trace_path'):
+        print('Grasp report: ' + rep['trace_path'])
+    if rep.get('descent', {}).get('stop_reason'):
+        print('Descent stop: ' + rep['descent']['stop_reason'])
     if rep.get("contact"):
-        print(f"  felt something {rep['met_at_cm']} cm above where the table was thought to be, closed there")
+        print(f"  inferred contact at {rep['met_at_cm']} cm; after backoff {rep['closed_at_cm']} cm (encoder/FK heights)")
     elif "contact" in rep:
         print("  went all the way down without feeling anything")
     if rep.get("jaws_gap_cm") is not None:
