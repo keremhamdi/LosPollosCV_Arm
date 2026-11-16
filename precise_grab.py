@@ -335,7 +335,9 @@ def next_descent(res, t):
      "reach": guessed extra reach in cm, or None to keep it}.
       it stopped clearly in the air (nothing can have been there): the same height, without the
           contact stop, so it can't stop early again
-      it closed at the planned height on nothing, having touched nothing: half as high
+      it closed at the planned height on nothing, having touched nothing: half as high; for a low
+          thing (under 3 cm), the other way of going down instead: to the table by touch if it went
+          to a height, to the lowest height if it went to the table
       a fingertip came down on top of the object: the aim was off by a centimetre or more. With
           nothing measured about the aim, try the other guess: 1 cm more reach, or none
       otherwise (the jaws closed beside it): the same again, at the new aim"""
@@ -344,10 +346,14 @@ def next_descent(res, t):
     top = t["height"] if t["height"] else (FLAT_LOOK_CM if t["flat"] else None)
     if rep.get("contact") and met is not None and top is not None and met > top + IN_THE_AIR_CM:
         return {"stop": False, "close": None, "reach": None}
-    if res.get("touch"):     # it went for the table and still got nothing: once more the same way, at the new aim
-        return {"stop": True, "close": None, "reach": None}
+    low = top is None or top < SWITCH_WAY_BELOW_CM
+    if res.get("touch") and low and not rep.get("slipped"):
+        # it went down to the table and got nothing: the other way, straight to the lowest height
+        return {"stop": True, "close": FLOOR_CLOSE_CM, "reach": None, "touch": False}
     untouched = rep.get("contact") is False or ("contact" not in rep and res.get("stop") is False)
     if untouched and closed is not None and not rep.get("slipped"):
+        if low:     # it closed at a height on nothing: maybe it lies lower than it looked. Find the table by touch
+            return {"stop": True, "close": None, "reach": None, "touch": True}
         return {"stop": True, "close": max(FLOOR_CLOSE_CM, round(0.5 * closed, 1)), "reach": None}
     other = None
     if res.get("reach") is not None and not rep.get("slipped") and landed_on_it(rep, t):
@@ -369,6 +375,8 @@ def grab_with_retries(a, t, find_again, tries=None):
             print(f"  Got it with {res['reach']:g} cm extra reach, so the next grabs start with that. "
                   'To measure it instead of guessing, type "aimcheck <object>" once.')
         _held.clear()
+        if res["holding"] and not a.dry:
+            _session["ways"][way_key(t)] = bool(res.get("touch"))    # this way works for this kind of thing
         if res["holding"]:      # remember where the jaws closed (what the arm measured, if it says), for putting it down
             rep = res.get("report") or {}
             tip = rep.get("tip_cm") or []
@@ -795,7 +803,12 @@ SHORT_GUESS_CM = 1.0        # "the arm stops about this short": tried on the sec
 AIM_FILE = "controller/calib/aim.json"   # what "aimcheck" measured: how far off the fixed camera's aim really is
 AIM_BLEND_CM = 8.0          # a check counts fully near where it was made, less further away
 AIM_CHECK_ABOVE_CM = 1.5    # aimcheck holds the open jaws this far above the object's top
-_session = {"reach": 0.0}   # the reach guess that last got something, for the next grabs of this run
+_session = {"reach": 0.0, "ways": {}}   # what last got something, for the next grabs of this run:
+#   the reach guess, and per kind of object (name + standing/lying) whether going down to the table by touch did
+
+
+def way_key(t):
+    return (t["text"].strip().lower(), "lying" if t["flat"] else "standing")
 
 
 def aim_checks():
@@ -919,6 +932,7 @@ def why_missed(rep, t, close=None):
     return "the jaws closed on nothing"
 
 
+SWITCH_WAY_BELOW_CM = 3.0    # lower than this: after a miss, try the other way of going down
 TOUCH_TABLE_BELOW_CM = 1.2   # lower than this (or lying flat): grip at the table itself, found by touch
 SMALL_OBJECT_CM = 6.0    # as in the arm's reach.py: under this (or height unknown) it handles the object as small
 IN_THE_AIR_CM = 1.5      # stopping this far above the object's top: nothing was there, a false touch
@@ -948,9 +962,13 @@ def grab_target(a, t, descent=None):
     # Flat and very low things (a cap lying down, a tablet) can only be gripped right at the table,
     # and the saved table height is not exact enough for that: go down until the fingertips touch
     # the table itself and close there. --no-touch keeps to the planned height.
-    touch = (not a.side and not a.no_feel and a.close is None and descent.get("stop", True)
-             and descent.get("close") is None and not getattr(a, "no_touch", False)
-             and (t["flat"] or (h is not None and h < TOUCH_TABLE_BELOW_CM)))
+    # Which way a low thing goes down is first read from how it looks (standing or lying), then from
+    # what worked for this kind of thing earlier in this run, and after a miss the other way is tried.
+    way = descent.get("touch")
+    if way is None:
+        way = _session["ways"].get(way_key(t), t["flat"] or (h is not None and h < TOUCH_TABLE_BELOW_CM))
+    touch = bool(way and not a.side and not a.no_feel and a.close is None and descent.get("stop", True)
+                 and descent.get("close") is None and not getattr(a, "no_touch", False))
     stop = touch or (not a.side and not a.no_feel and descent.get("stop", True)
                      and (not small or getattr(a, "feel_small", False)))
     out["stop"], out["touch"] = stop, touch

@@ -352,7 +352,7 @@ class Table:
         for target, name, value in ((G.requests, "get", self.get), (G.requests, "post", self.post),
                                     (G.ts, "decide", self.decide), (G, "show_view", lambda *a, **k: None),
                                     (G, "HAND_FILE", "no/such/hand.json"), (P, "AIM_FILE", "no/such/aim.json"),
-                                    (P, "_session", {"reach": 0.0})):
+                                    (P, "_session", {"reach": 0.0, "ways": {}})):
             p = patch.object(target, name, value)
             p.start()
             test.addCleanup(p.stop)
@@ -419,7 +419,8 @@ class GrabFlowTests(unittest.TestCase):
         self.table.miss_report = {"jaws_gap_cm": 0.0}        # what the arm reports without its contact stop
         P.find_and_grab(self.a, "bottle cap")
         first, second = (body for name, body in self.table.posts if name == "grab")
-        self.assertEqual((first["height"], second["height"], "guard" in second), (0.8, 0.5, False))
+        self.assertEqual((first["height"], "guard" in first), (0.8, False))
+        self.assertEqual((second.get("guard"), second.get("feel_all_the_way")), (True, True))   # low thing: now by touch
         tall = P.locate(self.a, "bottle cap")
         tall["height"] = 9.0
         self.table.posts.clear()
@@ -465,7 +466,7 @@ class GrabFlowTests(unittest.TestCase):
         self.table.miss_report = {"contact": False, "closed_at_cm": 0.8, "jaws_gap_cm": 0.0}
         P.find_and_grab(self.a, "bottle cap")
         first, second = (body for name, body in self.table.posts if name == "grab")
-        self.assertEqual((first["height"], second["height"], second.get("guard")), (0.8, 0.5, True))
+        self.assertEqual((first["height"], second.get("guard"), second.get("feel_all_the_way")), (0.8, True, True))
         self.assertIn("closed 0.8 cm above the table without touching anything", sys.stdout.getvalue())
         self.a.close = 2.0                                   # a height you gave is never changed
         self.table.posts.clear()
@@ -494,6 +495,28 @@ class GrabFlowTests(unittest.TestCase):
         self.table.posts.clear()
         P.find_and_grab(self.a, "bottle cap")
         self.assertNotIn("feel_all_the_way", self.table.posts[0][1])
+
+    def test_standing_or_lying_the_same_command_finds_the_way_down_by_itself(self):
+        standing, lying = sim.cylinder(-6, 24, 0.9, 1.4), sim.box(-6, 24, 1.4, 0.9, 0.9)
+        how = lambda: [("touch" if b.get("feel_all_the_way") else b["height"]) for n, b in self.table.posts if n == "grab"]
+        self.table.things = {"small white cylinder": standing}
+        self.assertTrue(P.find_and_grab(self.a, "small white cylinder")["holding"])
+        first_standing = how()
+        self.table.things, self.table.posts = {"small white cylinder": lying}, []
+        self.assertTrue(P.find_and_grab(self.a, "small white cylinder")["holding"])
+        self.assertEqual((first_standing, how()), ([0.8], ["touch"]))             # no height typed, no flag changed
+        # misjudged or just missed: the second try goes down the other way, and what works is remembered
+        self.table.miss_first, self.table.posts = 1, []
+        self.table.miss_report = {"contact": True, "met_at_cm": 0.0, "jaws_gap_cm": 0.0}
+        self.assertTrue(P.find_and_grab(self.a, "small white cylinder")["holding"])
+        self.assertEqual(how(), ["touch", 0.5])
+        self.table.posts = []
+        P.find_and_grab(self.a, "small white cylinder")
+        self.assertNotIn("touch", how())                                          # lying ones now start with what worked
+        self.table.things, self.table.posts, self.table.miss_first = {"small white cylinder": standing}, [], 1
+        self.table.miss_report = {"jaws_gap_cm": 0.0}
+        P.find_and_grab(self.a, "small white cylinder")
+        self.assertEqual(how(), [0.8, "touch"])                                   # a height that got nothing -> by touch
 
     def test_putting_down_lets_go_where_it_was_gripped_not_from_a_fixed_height(self):
         with patch.object(P, "_held", {}):
@@ -611,7 +634,11 @@ class GrabFlowTests(unittest.TestCase):
         self.assertIn("above the object", P.why_missed({"contact": True, "met_at_cm": 5.5}, small))
         plan = lambda r, reach=None: P.next_descent({"report": r, "close": 1.0, "reach": reach}, small)
         self.assertEqual(plan({"contact": True, "met_at_cm": 5.5}, 0.0), {"stop": False, "close": None, "reach": None})
-        self.assertEqual(plan({"contact": False}, 0.0), {"stop": True, "close": 0.5, "reach": None})
+        self.assertEqual(plan({"contact": False}, 0.0), {"stop": True, "close": None, "reach": None, "touch": True})
+        self.assertEqual(P.next_descent({"report": {"contact": False}, "close": 4.0}, {"height": 8.0, "flat": False}),
+                         {"stop": True, "close": 2.0, "reach": None})                  # a taller thing: half as high
+        self.assertEqual(P.next_descent({"report": {"contact": True, "met_at_cm": 0.0}, "close": 0.8, "touch": True}, small),
+                         {"stop": True, "close": 0.5, "reach": None, "touch": False})  # went to the table: now to a height
         self.assertEqual(plan({"contact": True, "met_at_cm": 2.1}, 0.0), {"stop": True, "close": None, "reach": 1.0})
         self.assertEqual(plan({"contact": True, "met_at_cm": 2.1}, 1.0), {"stop": True, "close": None, "reach": 0.0})
         self.assertEqual(plan({"contact": True, "met_at_cm": 0.2}, 1.0), {"stop": True, "close": None, "reach": None})   # beside it: same again
