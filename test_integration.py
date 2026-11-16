@@ -305,6 +305,80 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         reach.lift.assert_awaited_once()
         self.assertTrue(result)
 
+    async def test_bottle_with_wrist_guidance_keeps_numeric_height_through_controller(self):
+        """Replay the bottle request with a rejected 710px correction and a usable one.
+
+        Vision/calibration/motors are synthetic; client alignment, JSON routing and
+        the controller's close/lift decisions are real code. No robot connection.
+        """
+        import grab_text
+        from unittest.mock import mock_open
+        with patch.object(grab_text, 'find_and_grab') as pick, redirect_stdout(io.StringIO()):
+            grab_text.main(['--text', 'small bottle', '--hand'])
+        args, text = pick.call_args.args
+        args.last_text = text
+        img = Image.new('RGB', (1280, 720))
+        target = (560., 360.)
+        calibration = {'target_px': target, 'px_per_cm': [[17.25, 0.], [0., 17.25]],
+                       'look_above': 13., 'at': [-24.6, 23.2]}
+        self.app.camera.locate = Mock(return_value=(-24.6, 23.2))
+
+        for rejected, points, expected_xy in (
+            (True, [(1270., 360.)], (-25.39, 23.81)),
+            (False, [(577.25, 360.), target], (-26.4, 23.8)),
+        ):
+            with self.subTest(rejected=rejected):
+                reach = self.reach_module.Reacher.__new__(self.reach_module.Reacher)
+                reach.model = FakeModel()
+                reach.arm = types.SimpleNamespace(move=AsyncMock(),
+                    close_gripper=AsyncMock(return_value=(True, 60.)),
+                    gripper_still_holding=Mock(return_value=True))
+                reach.pose_for = Mock(return_value=(({}, {}), 0.))
+                reach.plan_swing = Mock(return_value=[{}])
+                reach.plan_line = Mock(return_value=[{}])
+                reach.duration = Mock(return_value=1.)
+                reach.follow = AsyncMock()
+                reach.state = Mock(return_value=(*expected_xy, 2., 0.))
+                reach.lift = AsyncMock()
+                reach.descend_guarded = AsyncMock(return_value={
+                    'contact': False, 'height_cm': 2., 'final_cm': 2.})
+                self.app.reacher = reach
+                submitted = []
+
+                def post(url, json, timeout):
+                    import json as wire_json
+                    name = url.rsplit('/', 1)[1]
+                    body = wire_json.loads(wire_json.dumps(json))
+                    submitted.append((name, body))
+                    result = {} if name == 'release' else asyncio.run(self.app.api(name, body))
+                    return Mock(json=lambda: {'ok': True, **result})
+
+                output = io.StringIO()
+                with patch.object(grab_text.requests, 'post', side_effect=post), \
+                        patch.object(grab_text.requests, 'get', return_value=Mock(json=lambda: {'log': 'test'})), \
+                        patch.object(grab_text, 'estimate_height', return_value=(4., 4., None)), \
+                        patch('os.path.exists', return_value=True), \
+                        patch('builtins.open', mock_open(read_data=json.dumps(calibration))), \
+                        patch.object(grab_text, 'find_in_hand', side_effect=[(p, img, None) for p in points]) as wrist, \
+                        patch.object(grab_text, 'save_hand_view'), \
+                        patch.object(grab_text, 'goto') as move, redirect_stdout(output):
+                    close, above, est = grab_text.grab_heights(args, None, img.size)
+                    await asyncio.to_thread(grab_text.go, args, img, 853, 537, 'small bottle',
+                                            .95, close, above, est)
+
+                body = submitted[-1][1]
+                self.assertEqual(submitted[-1][0], 'grab')
+                self.assertEqual(body['height'], 2.)
+                self.assertEqual(body['object_height'], 4.)
+                self.assertNotIn('feel_all_the_way', body)
+                self.assertEqual((body['x'], body['y']), expected_xy)
+                self.assertEqual(wrist.call_count, len(points))
+                self.assertEqual(move.call_count, len(points))
+                self.assertEqual('not trusting it' in output.getvalue(), rejected)
+                reach.descend_guarded.assert_awaited_once_with(*expected_xy, 2.)
+                reach.arm.close_gripper.assert_awaited_once()
+                reach.lift.assert_awaited_once()
+
     async def test_bridge_to_controller_end_to_end_without_sockets(self):
         session = Mock()
         session.get.side_effect = lambda *a, **k: Mock(json=lambda: self.app.status())

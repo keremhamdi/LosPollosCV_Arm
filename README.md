@@ -4,8 +4,13 @@
 restored to the friend's commit `a8ccb74` after the `feel-stop-v2` change failed
 on the physical arm. `grab_text.py` now uses standing-camera guidance by default;
 wrist alignment requires `--hand`. Pickup honours its planned closing height
-instead of automatically searching below the table. See
+instead of automatically searching below the table. To use **both cameras**,
+start the controller with `--camera /dev/video4 --hand-camera /dev/video6`
+and run `.venv/bin/python -B grab_text.py --hand` from the repository root. See
 [current status and test commands](docs/GRASP_ACCURACY.md).
+
+The sections below describe the separate `text_pick.py` integration. For the
+friend's working `grab_text.py` pickup flow, use the branch guide linked above.
 
 Text-prompted object detection, segmentation and grasp proposals for an ElRobot
 with **two continuously connected cameras: one fixed standing camera and one
