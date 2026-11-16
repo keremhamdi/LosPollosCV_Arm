@@ -617,7 +617,7 @@ class GrabFlowTests(unittest.TestCase):
     def test_reach_out_is_only_added_for_an_old_gripper_camera_setup_or_on_request(self):
         target = P.locate(self.a, "bottle cap")
         for hand, asked, extra in (({"used": True, "lean_aware": True}, None, 0.0),
-                                   ({"used": True, "lean_aware": False}, None, 1.0),
+                                   ({"used": True, "lean_aware": False}, None, 0.0),   # aligned by camera: nothing added
                                    ({"used": False, "lean_aware": False}, None, 0.0),
                                    ({"used": True, "lean_aware": True}, -0.5, -0.5)):
             self.table.posts.clear()

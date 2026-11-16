@@ -798,7 +798,6 @@ def hand_align(a, text, x, y, obj_h=None, width=None):
     return x, y, info
 
 
-OLD_SETUP_REACH_OUT = 1.0   # cm further out, only with a gripper camera setup that doesn't know the lean
 SHORT_GUESS_CM = 1.0        # "the arm stops about this short": tried on the second grab if the first one's aim missed
 AIM_FILE = "controller/calib/aim.json"   # what "aimcheck" measured: how far off the fixed camera's aim really is
 AIM_BLEND_CM = 8.0          # a check counts fully near where it was made, less further away
@@ -999,7 +998,9 @@ def grab_target(a, t, descent=None):
         if a.reach_out is not None:
             shift, why = (a.reach_out, 0.0), "--reach-out"
         elif hand["used"]:
-            shift, why = (0.0 if hand["lean_aware"] else OLD_SETUP_REACH_OUT, 0.0), "gripper camera setup without lean"
+            # the gripper camera has just put the object under the jaws: nothing is added on top of that.
+            # (An older setup got 1 cm here; on the arm that pushed a centred aim 1 cm past the object.)
+            shift, why = (0.0, 0.0), "gripper camera"
         elif saved is not None:
             shift, why = saved, "aim check"
         else:
