@@ -454,6 +454,22 @@ class GrabFlowTests(unittest.TestCase):
             P.find_and_grab(self.a, "bottle cap")
         self.assertEqual(self.table.names(), ["grab"])
 
+    def test_flat_and_very_low_things_are_gripped_at_the_table_found_by_touch(self):
+        for name, thing in (("coin", sim.cylinder(0, 30, 2.5, 0.2)), ("tablet", sim.cylinder(-6, 24, 1.0, 0.5))):
+            self.table.things = {name: thing}
+            self.table.posts.clear()
+            res = P.find_and_grab(self.a, name)
+            body = self.table.posts[0][1]
+            self.assertEqual((body.get("guard"), body.get("feel_all_the_way"), res["touch"]), (True, True, True), name)
+        for change in ({"no_touch": True}, {"close": 1.0}, {"no_feel": True}):      # each of these keeps to a height
+            self.table.posts.clear()
+            P.find_and_grab(P.options(arm_url="http://arm.invalid", **change), "tablet")
+            self.assertNotIn("feel_all_the_way", self.table.posts[0][1], change)
+        self.table.things = {"bottle cap": self.cap}                                 # 1.5 cm tall: planned height as before
+        self.table.posts.clear()
+        P.find_and_grab(self.a, "bottle cap")
+        self.assertNotIn("feel_all_the_way", self.table.posts[0][1])
+
     def test_putting_down_lets_go_where_it_was_gripped_not_from_a_fixed_height(self):
         with patch.object(P, "_held", {}):
             P.find_and_grab(self.a, "bottle cap")                # gripped 0.8 cm up

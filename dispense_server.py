@@ -127,7 +127,8 @@ def grab_settings(a):
     return P.options(arm_url=a.arm_url, close=getattr(a, "precise_close", None), above=a.above,
                      tries=getattr(a, "tries", 2), no_hand=not getattr(a, "hand", False),
                      no_feel=getattr(a, "no_feel", False), reach_out=getattr(a, "reach_out", None),
-                     min_close=getattr(a, "min_close", P.LOW_CLOSE_CM), feel_small=getattr(a, "feel_small", False))
+                     min_close=getattr(a, "min_close", P.LOW_CLOSE_CM), feel_small=getattr(a, "feel_small", False),
+                     no_touch=getattr(a, "no_touch", False))
 
 
 def locate_precise(a, kind, name, min_conf, near=None):
@@ -337,6 +338,7 @@ def main():
     ap.add_argument("--min-close", type=float, default=0.8, metavar="CM",
                     help="small and flat things may be closed on this low above the table (default 0.8)")
     ap.add_argument("--feel-small", action="store_true", help="use the arm's contact stop for small objects too")
+    ap.add_argument("--no-touch", action="store_true", help="don't go down to touch the table for flat and very low things")
     ap.add_argument("--reach-out", type=float, default=None, metavar="CM",
                     help="aim this many cm further from the base than measured (default: aim check, else the retry's guess)")
     ap.add_argument("--above", type=float, default=14.0, help="approach / carry height, cm")
