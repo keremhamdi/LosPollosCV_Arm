@@ -21,6 +21,12 @@ HTTP API (used by the page, and by other programs such as pick_v2.py):
                      add "method": "side" to come in from the side (default "top")
   POST /api/place    {"x", "y", "height", "above"}       table point in cm (or "u", "v")
   POST /api/park     {}                                  back to poses/park.json, gripper unchanged
+  POST /api/goto     {"x", "y", "height", "tilt"}        move the fingertips there (tilt optional) -> {"tilt"}
+  POST /api/touch_down {"x", "y"}                        lower the tip until it touches -> where the table is
+  GET  /pose         where the gripper really is (from the encoders): 4x4 matrix, tip, table
+  GET  /model        the arm's geometry and joint ranges
+  /api/grab also takes "guard": true (last part of the way down by feel) and "feel_all_the_way": true
+  (no closing height: down until the gripper meets the table or the object's top).
 
 Run from the repo root:
   python -m arm.click --camera /dev/video4     read the camera directly, sharp (recommended)
@@ -38,19 +44,36 @@ import logging
 import math
 import sys
 import time
+from datetime import datetime, timezone
+from uuid import uuid4
 from urllib.parse import parse_qs, urlparse
 
 from arm.arm import GRIPPER_ID, Arm, load_pose, save_pose
 from arm.kinematics import MOTOR_JOINTS, ArmModel
 from arm.vision_contract import capabilities, normalize_grab, normalize_place, MAX_JOINT_AGE_S
 from arm.observations import ObservationStore, measured_pose
-from arm.reach import CLEARANCE_CM, Reacher, Unreachable, _solve
+from arm.reach import CLEARANCE_CM, Reacher, Table, Unreachable, _solve
 from arm.station import REPO_ROOT
 from target.gen_python.protobuf.drivers.inferences import normvla
 
 PORT = 8890
 CAMERA_FILE = REPO_ROOT / "calib" / "camera.json"
 QUEUE = "inference/normvla"
+
+
+def save_grasp_report(report):
+    """Local diagnostics only; a disk error must not hide a motion error."""
+    run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ') + '_' + uuid4().hex[:8]
+    folder = REPO_ROOT.parent / 'config' / 'local' / 'grasp_runs'
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / (run_id + '.json')
+        path.write_text(json.dumps({'run_id': run_id, **report}, indent=2) + '\n')
+        print('Grasp report:', path)
+        return str(path)
+    except OSError as exc:
+        print(f'Could not save grasp report: {exc}', file=sys.stderr)
+        return None
 
 
 # ---------- pixel -> table position ----------
@@ -87,13 +110,43 @@ class Camera:
     def _norm(self, u, v):
         return u / self.size, v / self.size
 
+    BOARD_MARKS = 54   # one checkerboard position from vision/calibrate_board.py (9 x 6 corners)
+
     def _fit(self):
         self.h = None
+        self.boards = []
         if len(self.pairs) >= 4:
             try:
                 self.h = fit_homography([(*self._norm(u, v), x, y) for u, v, x, y in self.pairs])
             except ValueError:
                 pass  # marks in a line: no solution yet
+        # Several checkerboard positions: give each its own mapping for the area it covers. The arm's
+        # own error differs a little from one table area to another (it bends differently there), so
+        # one mapping for the whole picture can't fit them all; locally the errors cancel out.
+        n = self.BOARD_MARKS
+        if len(self.pairs) >= 2 * n and len(self.pairs) % n == 0:
+            for k in range(0, len(self.pairs), n):
+                block = self.pairs[k:k + n]
+                try:
+                    h = fit_homography([(*self._norm(u, v), x, y) for u, v, x, y in block])
+                except ValueError:
+                    self.boards = []
+                    break
+                us, vs = [p[0] for p in block], [p[1] for p in block]
+                self.boards.append((h, min(us), max(us), min(vs), max(vs)))
+
+    BLEND_PX = 18.0    # within a board its own mapping dominates; between boards it blends over this scale
+
+    def _board_weights(self, u, v):
+        """How much each board's mapping counts at pixel (u, v): ~1 on its own area, smoothly shared
+        between neighbours in the gaps (inverse distance to each board's area)."""
+        w = []
+        for _, u0, u1, v0, v1 in self.boards:
+            du = max(u0 - u, 0, u - u1)
+            dv = max(v0 - v, 0, v - v1)
+            w.append(1.0 / (du * du + dv * dv + self.BLEND_PX ** 2) ** 2)
+        total = sum(w)
+        return [x / total for x in w]
 
     def save(self):
         CAMERA_FILE.parent.mkdir(exist_ok=True)
@@ -107,7 +160,13 @@ class Camera:
     def locate(self, u, v):
         if self.h is None:
             raise RuntimeError("Camera not calibrated yet: needs at least 4 marks (not all in one line).")
-        return apply_homography(self.h, *self._norm(u, v))
+        if not self.boards:
+            return apply_homography(self.h, *self._norm(u, v))
+        x = y = 0.0
+        for wt, (h, *_) in zip(self._board_weights(u, v), self.boards):
+            bx, by = apply_homography(h, *self._norm(u, v))
+            x, y = x + wt * bx, y + wt * by
+        return x, y
 
     def errors(self):
         """How far each mark lands from where the arm touched it, cm."""
@@ -234,6 +293,7 @@ class App:
         d["camera_role"] = self.camera_roles.get(self.camera.cam)
         d["observations"] = self.observations.snapshot(images=False)
         d["torque"] = all(j.torque for j in self.arm.joints.values())
+        d["joints_raw"] = {str(i): (j.goal if j.torque else j.raw) for i, j in self.arm.joints.items()}
         return d
 
     async def api(self, name, body):
@@ -279,6 +339,11 @@ class App:
         elif name == "reload":
             self.camera = Camera()
             self.pending = None
+            if isinstance(self.reacher, Reacher):   # the table may have been taught again too
+                try:
+                    self.reacher.table = Table.load()
+                except (RuntimeError, ValueError, KeyError, OSError):
+                    pass
             errs = self.camera.errors()
             self.log = f"Calibration reloaded: {len(self.camera.pairs)} marks" + (
                 f", landing within {max(errs):.1f} cm." if errs else ".")
@@ -289,6 +354,68 @@ class App:
         elif name == "hold":
             await self.arm.hold()
             self.log = "Arm is holding its position."
+        elif name == "goto":   # move the fingertips to x, y (cm), height cm above the table (e.g. to look down)
+            if self.busy:
+                raise RuntimeError("Already moving.")
+            x, y, h = float(body["x"]), float(body["y"]), float(body.get("height", 12))
+            tilt = body.get("tilt")              # gripper lean from straight down, degrees (default: the least that reaches)
+            self.busy = True
+            self.log = f"Moving to x={x:.1f}, y={y:.1f}, {h:g} cm up..."
+            try:
+                used = await self.reach().goto(x, y, h, tilt=float(tilt) if tilt is not None else None)
+                self.log = f"At x={x:.1f}, y={y:.1f}, {h:g} cm up."
+            finally:
+                self.busy = False
+            return {"tilt": used}
+        elif name == "plan":   # where WOULD the gripper be for this target? (nothing moves)
+            x, y, h = float(body["x"]), float(body["y"]), float(body.get("height", 12))
+            tilt = body.get("tilt")
+            r = self.reach()
+            (q,), used = r.pose_for(x, y, [h], float(tilt) if tilt is not None else None)
+            m, _ = r.model.frames(q)
+            return {"tilt": used, "T_base_gripper": [[float(v) for v in row] for row in m]}
+        elif name == "gripper":   # open/close the jaws to a percentage (100 = open)
+            if self.busy:
+                raise RuntimeError("Already moving.")
+            await self.arm.move({GRIPPER_ID: max(0.0, min(100.0, float(body["pct"])))}, 0.8)
+            self.log = "Gripper moved."
+        elif name == "touch_down":   # lower the tip at x, y until it touches: tells where the table really is
+            if self.busy:
+                raise RuntimeError("Already moving.")
+            x, y = float(body["x"]), float(body["y"])
+            start = float(body.get("from", 5.0))
+            r = self.reach()
+            self.busy = True
+            self.log = f"Feeling for the table at x={x:.1f}, y={y:.1f}..."
+            try:
+                tx, ty, th, _ = r.state()
+                if math.hypot(tx - x, ty - y) > 0.5 or abs(th - start) > 0.5:
+                    if th < start - 0.5:         # first up, so nothing sweeps along the table
+                        try:
+                            await r.lift(tx, ty, start)
+                        except Unreachable:
+                            pass
+                    await r.goto(x, y, start)
+                felt = await r.descend_guarded(x, y, float(body.get("floor", -2.5)),
+                                               backoff=float(body.get("backoff", 0.0)))
+                self.log = (f"Touched at {felt['height_cm']:+.1f} cm." if felt["contact"]
+                            else "Went all the way down without feeling anything.")
+            finally:
+                self.busy = False
+            return felt
+        elif name == "nudge":   # turn one joint by a few degrees (for "trim": straightening the gripper)
+            if self.busy:
+                raise RuntimeError("Already moving.")
+            m, deg = int(body["joint"]), float(body["deg"])
+            if m not in self.arm.joints or m == GRIPPER_ID:
+                raise RuntimeError(f"No joint {m} to turn.")
+            j = self.arm.joints[m]
+            raw = (j.goal if j.torque else j.raw) + deg * 4096 / 360
+            pct = 100.0 * (raw - j.range_min) / (j.range_max - j.range_min)
+            if not 0 <= pct <= 100:
+                raise RuntimeError(f"Joint {m} can't turn further that way.")
+            await self.arm.move({m: pct}, 0.6)
+            self.log = f"Joint {m} turned {deg:+g} degrees."
         elif name == "release":
             await self.arm.hold()
             await self.arm.move({GRIPPER_ID: 100}, 0.8)
@@ -311,17 +438,34 @@ class App:
             self.busy = True
             self.log = f"Grabbing at x={x:.1f}, y={y:.1f}, closing {height:g} cm above the table..."
             side = request["method"] == "side"
+            report = {'controller_build': capabilities()['controller_build'],
+                      'target_cm': [x, y, height], 'request': body, 'error': None}
+            report_path = None
             try:
                 if side:
                     got = await self.reach().grab_side(x, y, height, lift_cm=above - height, approach_h=above)
                 else:
-                    got = await self.reach().grab(x, y, height, above)
+                    oh = body.get("object_height")   # estimated object height (cm): small/big handling
+                    cp = body.get("close_pct")       # how far the jaws close (% open): just under its width
+                    kw = dict(object_h=float(oh) if oh is not None else None,
+                              close_pct=max(0.0, min(100.0, float(cp))) if cp is not None else 0.0)
+                    if body.get("guard"):            # the last part of the way down by feel
+                        kw.update(guard=True, report=report)
+                        if body.get("feel_all_the_way"):
+                            height = None            # no closing height given: down until it meets something
+                    got = await self.reach().grab(x, y, height, above, **kw)
                 self.log = (f"Grabbed at x={x:.1f}, y={y:.1f}: holding it." if got
                             else f"Closed at x={x:.1f}, y={y:.1f} but nothing is in the gripper.")
+                report['holding'] = bool(got)
+            except Exception as exc:
+                report['error'] = str(exc)
+                raise
             finally:
                 self.busy = False
+                report_path = save_grasp_report(report)
             return {"holding": bool(got), "method": request["method"],
-                    "closing_angle_applied": False, "above_cm": above}
+                    "closing_angle_applied": False, "above_cm": above, "report": report,
+                    'report_path': report_path}
         elif name == "save_park":
             pose = self.arm.percent()
             save_pose("park", pose)
@@ -344,9 +488,9 @@ class App:
             self.log = "Parking..."
             try:
                 x, y, h, _ = r.state()
-                if h < 10:  # first straight up, so nothing sweeps along the table
+                if h < 10:  # first up, so nothing sweeps along the table
                     try:
-                        await r.goto(x, y, 12, line=True)
+                        await r.lift(x, y, 12)
                     except Unreachable:
                         pass
                 path = r.plan_swing(q, park_h)
@@ -375,7 +519,7 @@ class App:
                 await r.goto(x, y, above)                     # carry it over, staying high
                 await r.goto(x, y, height, line=True)         # straight down
                 await self.arm.move({GRIPPER_ID: 100}, 0.8)   # let go
-                await r.goto(x, y, above, line=True)          # straight back up
+                await r.lift(x, y, above)                     # back up
                 self.log = f"Placed at x={x:.1f}, y={y:.1f}."
             finally:
                 self.busy = False
@@ -412,6 +556,20 @@ class App:
                 data = json.dumps(self.observations.snapshot()).encode()
             elif url.path == "/status":
                 data = json.dumps(self.status()).encode()
+            elif url.path == "/pose" and method == "GET":      # where the gripper really is (encoders)
+                try:
+                    d = self.reach().pose()
+                    now = time.monotonic()
+                    d["oldest_reading_s"] = max(now - self.arm.joint_updated_at.get(i, -math.inf) for i in range(1, 8))
+                    d["busy"] = self.busy
+                    data = json.dumps({"ok": True, **d}).encode()
+                except (RuntimeError, ValueError, KeyError) as e:
+                    data = json.dumps({"ok": False, "error": str(e)}).encode()
+            elif url.path == "/model" and method == "GET":     # the arm's geometry, to redo its maths elsewhere
+                try:
+                    data = json.dumps({"ok": True, **self.reach().model_info()}).encode()
+                except (RuntimeError, ValueError, KeyError) as e:
+                    data = json.dumps({"ok": False, "error": str(e)}).encode()
             elif url.path.startswith("/api/") and method == "POST":
                 try:
                     out = await self.api(url.path[5:], body)

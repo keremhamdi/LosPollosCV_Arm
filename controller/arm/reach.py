@@ -31,14 +31,14 @@ import sys
 import time
 
 from arm.arm import BLOCKED_STEPS, GOAL_POSITION, GRIPPER_ID, SEND_RATE_HZ, Arm
-from arm.kinematics import MOTOR_JOINTS, TIP_OFFSET, ArmModel, _apply, _ask
+from arm.kinematics import (MOTOR_JOINTS, TIP_OFFSET, TRIM_FILE, ArmModel, _apply, _ask,   # noqa: F401
+                            joint_trim, roll_raw, tip_offset)
 from arm.station import REPO_ROOT
 
 from arm.vision_contract import GRIPPER_OPEN_CM, JAW_MARGIN_CM, width_fits
 from arm.trajectory_timing import bounded_duration, ease
 
 TABLE_FILE = REPO_ROOT / "calib" / "table.json"
-
 IK_MOTORS = [1, 2, 3, 4, 5, 6]   # joint 7 (wrist roll) stays where it is, 8 is the gripper
 DIR_WEIGHT = 0.10                # how much pointing-down error counts vs position error
 POS_TOL = 0.003                  # 3 mm: a waypoint the solver can't reach this well is "unreachable"
@@ -49,6 +49,13 @@ MIN_BODY_HEIGHT = 1.5            # cm: lowest any wrist/forearm joint may go
 CLEARANCE_CM = 5.0               # approach this far above an object's top
 MAX_AUTO_TILT = 80               # degrees: most the gripper may lean forward when chosen automatically
 BASE_Y_CM = 4.2                  # the base's turning axis sits at x=0, y=4.2 cm in the model
+SMALL_OBJECT_CM = 6.0            # below this: let the arm end a little low on the way down (no sag push-up)
+GUARD_SPEED_CM_S = 2.5           # going down by feel: this slowly
+GUARD_THRESH_CM = 0.6            # ... "met something" = the arm is this much higher than told, beyond its usual lag
+GUARD_BLANK_S = 0.45             # ... not judged during the first moment (the arm is still getting going)
+GUARD_BACKOFF_CM = 0.3           # ... then lift off what it met by this much before closing
+GUARD_FROM_CM = 7.0              # ... starts feeling from this height (faster down to here)
+GUARD_FLOOR_CM = -2.5            # ... gives up this far below where the table is thought to be
 MAX_JOINT_SPEED = 700            # peak continuous reference steps/s (~60 deg/s), before integer rounding
 STEPS_PER_RAD = 4096 / (2 * math.pi)
 
@@ -129,7 +136,7 @@ class Reacher:
     def _mid(self, motor):
         j = self.arm.joints[motor]
         lim = self._lim[MOTOR_JOINTS[motor]]
-        return (j.range_min + j.range_max) / 2, (lim["lower"] + lim["upper"]) / 2
+        return (j.range_min + j.range_max) / 2, (lim["lower"] + lim["upper"]) / 2 + joint_trim(motor)
 
     def _angle(self, motor, raw):
         mid_raw, mid_ang = self._mid(motor)
@@ -150,7 +157,9 @@ class Reacher:
         out = {}
         for motor, name in MOTOR_JOINTS.items():
             j = self.arm.joints[motor]
-            out[name] = self._angle(motor, j.goal if j.torque else j.raw)
+            # holding: its target (minus any push that makes up for sag), else where it is
+            sag = getattr(self.arm, "sag", {}).get(motor, 0) if j.torque else 0
+            out[name] = self._angle(motor, (j.goal - sag) if j.torque else j.raw)
         return out
 
     # ---------- forward ----------
@@ -158,7 +167,7 @@ class Reacher:
     def tip(self, angles):
         """(tip position, direction the gripper points, joint positions), metres."""
         m, pts = self.model.frames(angles)
-        return _apply(m, TIP_OFFSET), (m[0][1], m[1][1], m[2][1]), pts
+        return _apply(m, tip_offset()), (m[0][1], m[1][1], m[2][1]), pts
 
     def state(self, angles=None):
         """x, y of the table point right below the tip (cm), height above the table (cm),
@@ -220,7 +229,9 @@ class Reacher:
     def _seed(self):
         """Fixed starting guess (every joint mid-range), so the same target always gives the same arm shape."""
         seed = {MOTOR_JOINTS[m]: sum(self._limits(m)) / 2 for m in MOTOR_JOINTS}
-        seed[MOTOR_JOINTS[7]] = self.current_angles()[MOTOR_JOINTS[7]]  # wrist roll stays as it is
+        r = roll_raw()
+        # wrist roll: to its straight position if "trim" saved one, else it stays as it is
+        seed[MOTOR_JOINTS[7]] = self._angle(7, r) if r is not None else self.current_angles()[MOTOR_JOINTS[7]]
         return seed
 
     def pose_for(self, x_cm, y_cm, heights, tilt=None):
@@ -270,34 +281,48 @@ class Reacher:
         self._check_floor(path, target_h_cm)
         return path
 
-    def plan_line(self, x_cm, y_cm, h_cm):
+    def plan_line(self, x_cm, y_cm, h_cm, partial=False, allow_below=False, step_cm=STEP_CM):
         """The tip travels in a straight line and the gripper keeps the direction it has now.
-        For going down onto an object and lifting it."""
-        if h_cm < MIN_TIP_HEIGHT:
+        For going down onto an object and lifting it. With partial=True, a line the arm can't
+        finish returns the part it can do (for lifting: as high as possible) instead of failing.
+        allow_below=True: the target may be below where the table is thought to be (only for
+        descend_guarded, which stops by feel when the fingertips really touch)."""
+        if h_cm < MIN_TIP_HEIGHT and not allow_below:
             raise Unreachable(f"Height {h_cm} cm is below the minimum of {MIN_TIP_HEIGHT} cm above the table.")
         target = self._target(x_cm, y_cm, h_cm)
         q = self.current_angles()
         p0, d0, _ = self.tip(q)
-        steps = max(4, int(math.dist(p0, target) * 100 / STEP_CM))
+        steps = max(4, int(math.dist(p0, target) * 100 / step_cm))
         path = []
         for i in range(1, steps + 1):
             pos = tuple(p0[k] + (target[k] - p0[k]) * i / steps for k in range(3))
             q, perr, derr = self.solve(q, pos, d0)
             if perr > POS_TOL or derr > DIR_TOL:
+                if partial and path:
+                    break
                 raise Unreachable(f"Can't follow a straight line to x={x_cm:.1f}, y={y_cm:.1f}, height={h_cm:g} "
                                   f"(stuck {i / steps:.0%} along the way). Too far, or a joint limit.")
             path.append(q)
         self._check_floor(path, h_cm)
         return path
 
-    async def follow(self, path, seconds):
-        """Send a planned path to the servos, with a gentle start and stop."""
+    async def follow(self, path, seconds, correct_sag=True, feedforward=False):
+        """Send a planned path to the servos, with a gentle start and stop.
+        feedforward=True: add the sag push measured at the last pose to the whole path from the start,
+        so the arm doesn't droop short at the end, without a correcting jerk once it gets there."""
         arm = self.arm
+        ff = {m: arm.sag.get(m, 0) for m in IK_MOTORS} if feedforward else {}
         await arm.hold()  # also resets speed/accel, which mirroring may have changed
         motors = list(MOTOR_JOINTS)
         start = {m: (arm.joints[m].goal if arm.joints[m].torque else arm.joints[m].raw) for m in motors}
-        way = [start] + [{m: self._raw(m, q[MOTOR_JOINTS[m]]) for m in motors} for q in path]
-        way = [{m: w[m] for m in IK_MOTORS} for w in way]  # joint 7 is never commanded
+
+        def raw_ff(m, q):
+            j = arm.joints[m]
+            return max(j.range_min, min(j.range_max, self._raw(m, q[MOTOR_JOINTS[m]]) + ff.get(m, 0)))
+        way = [start] + [{m: raw_ff(m, q) for m in motors} for q in path]
+        cmd = IK_MOTORS + [7] if roll_raw() is not None else IK_MOTORS   # joint 7 only once "trim" set it
+        way = [{m: w[m] for m in cmd} for w in way]
+        end = {m: self._raw(m, path[-1][MOTOR_JOINTS[m]]) for m in cmd}   # where the joints should really end
         n = len(way) - 1
         # Bound peak speed even with uneven waypoint spacing; average travel was
         # insufficient. The quintic easing also starts/ends with zero acceleration.
@@ -309,17 +334,196 @@ class Reacher:
             f = s * n
             i = min(n - 1, int(f))
             u = f - i
-            goals = {m: round(way[i][m] + (way[i + 1][m] - way[i][m]) * u) for m in IK_MOTORS}
+            goals = {m: round(way[i][m] + (way[i + 1][m] - way[i][m]) * u) for m in cmd}
             await arm._write([(m, GOAL_POSITION, g.to_bytes(2, "little")) for m, g in goals.items()])
             if s >= 1.0:
                 break
             await asyncio.sleep(1 / SEND_RATE_HZ)
-        await arm._settle_and_ease(way[-1])
-        off = [m for m in IK_MOTORS if abs(arm.joints[m].raw - way[-1][m]) > 150]
+        if ff:
+            await arm._settle_and_ease(end, correct_sag, aim=way[-1])
+        else:
+            await arm._settle_and_ease(way[-1], correct_sag)
+        off = [m for m in IK_MOTORS if abs(arm.joints[m].raw - end[m]) > 150]
         if len(off) >= 2:
             raise RuntimeError(
                 f"The arm stopped before its target (joints {off} are far off). Either something blocks it "
                 "(table, object, cable), or the follower is on mirroring instead of (Self-controlled).")
+
+    async def lift(self, x_cm, y_cm, h_cm, seconds=None, cm_per_s=5.0):
+        """Go up to h_cm above x, y, e.g. after closing on an object.
+
+        Straight up keeps the gripper's current angle. After closing on something, that angle is
+        often a few degrees off the plan (the load pulls the arm down), and the top of the line
+        can then be out of reach. So if the straight line can't be done whole: straight up as far
+        as it goes, then the rest of the way with whatever lean reaches it."""
+        try:
+            up = self.plan_line(x_cm, y_cm, h_cm)
+        except Unreachable:
+            up = None
+        if up is not None:   # the normal case: straight up all the way
+            await self.follow(up, seconds or self.duration(up))
+            return
+        start_h = self.state()[2]
+        up = self.plan_line(x_cm, y_cm, h_cm, partial=True)
+        await self.follow(up, max(1.5, (h_cm - start_h) / cm_per_s))
+        now_h = self.state()[2]
+        if now_h >= h_cm - 0.7:
+            return
+        try:
+            (q,), _ = self.pose_for(x_cm, y_cm, [h_cm])
+            rest = self.plan_swing(q, h_cm)
+        except Unreachable:
+            if now_h - start_h >= 3.0:   # well off the table: good enough, stay here
+                return
+            raise
+        await self.follow(rest, max(1.0, (h_cm - now_h) / cm_per_s))
+
+    # ---------- what the encoders say ----------
+
+    def measured_angles(self):
+        """Joint angles from the encoders (where the arm really is, not where it was told to go)."""
+        return {n: self._angle(m, self.arm.joints[m].raw) for m, n in MOTOR_JOINTS.items()}
+
+    def pose(self):
+        """Where the gripper really is, for other programs (the gripper camera's maths):
+        the gripper's 4x4 matrix in the arm's frame (metres), the tip, the table, the raw joint readings."""
+        q = self.measured_angles()
+        m, _ = self.model.frames(q)
+        x, y, h, tilt = self.state(q)
+        t = self.table
+        return {"T_base_gripper": [[float(v) for v in row] for row in m], "tip_cm": [x, y, h], "tilt_deg": tilt,
+                "tip_offset_m": list(tip_offset()), "table": {"a": t.a, "b": t.b, "c": t.c},
+                "joints_raw": {str(i): j.raw for i, j in self.arm.joints.items()},
+                "joints_goal": {str(i): j.goal for i, j in self.arm.joints.items()},
+                "torque": all(j.torque for j in self.arm.joints.values())}
+
+    def model_info(self):
+        """Everything another program needs to redo this arm's forward kinematics itself."""
+        chain = [{"name": j["name"], "type": j["type"], "origin": [[float(v) for v in row] for row in j["origin"]],
+                  "axis": j["axis"],
+                  "lower": j["lower"], "upper": j["upper"],
+                  "motor": self.model.motor_of.get(j["name"])} for j in self.model.chain]
+        joints = {str(m): {"range_min": self.arm.joints[m].range_min, "range_max": self.arm.joints[m].range_max,
+                           "trim_deg": math.degrees(joint_trim(m))} for m in MOTOR_JOINTS}
+        return {"chain": chain, "joints": joints, "tip_offset_m": list(tip_offset()),
+                "tip_offset_nominal_m": list(TIP_OFFSET), "steps_per_rad": STEPS_PER_RAD, "roll_raw": roll_raw()}
+
+    # ---------- going down by feel ----------
+
+    async def descend_guarded(self, x_cm, y_cm, floor_cm, speed=None, backoff=None, report=None):
+        """Straight down from where the tip is, slowly, towards floor_cm above the table, and stop at
+        the first thing the gripper meets: the table under the fingertips, or the top of an object
+        under the palm. Then lift off that by `backoff` cm and hold there.
+
+        How it feels: it compares, 25 times a second, the height the arm was told to be at with the
+        height the encoders say it is at. While moving freely the two stay a steady small distance
+        apart. When that distance suddenly grows, something is holding the gripper up.
+
+        floor_cm may be below 0 (to find a table that lies lower than expected). If nothing is met,
+        the arm ends at floor_cm (or as low as it can reach).
+        Returns {"contact": bool, "height_cm": where it stopped by the arm's own reading, before lifting off,
+                 "final_cm": where it holds now}."""
+        arm = self.arm
+        report = report if report is not None else {}
+        report.update(requested_height_cm=floor_cm, samples=[], compensation='taper_to_zero')
+        speed = speed or GUARD_SPEED_CM_S
+        backoff = GUARD_BACKOFF_CM if backoff is None else backoff
+        t = self.table
+        # A normal pickup needs the complete closing-height path. Partial paths
+        # remain available only for the explicit below-table touch/search tool.
+        path = self.plan_line(x_cm, y_cm, floor_cm, partial=floor_cm < MIN_TIP_HEIGHT,
+                              allow_below=True, step_cm=0.5)
+        ff = {m: arm.sag.get(m, 0) for m in IK_MOTORS}       # what the arm needs to hold itself up, from the last stop
+        await arm.hold()
+        cmd = IK_MOTORS + [7] if roll_raw() is not None else IK_MOTORS
+        h_from = t.height(self.tip(self.current_angles())[0]) * 100
+        heights = [h_from] + [t.height(self.tip(q)[0]) * 100 for q in path]            # told-to-be heights along the way
+        start = {m: (arm.joints[m].goal if arm.joints[m].torque else arm.joints[m].raw) for m in cmd}
+        true = [{m: start[m] - ff.get(m, 0) for m in cmd}] + [{m: self._raw(m, q[MOTOR_JOINTS[m]]) for m in cmd} for q in path]
+        n = len(true) - 1
+        # Hover compensation is pose-dependent: carrying the bottle run's -57
+        # shoulder steps all the way down raised its final motor target ~2.9 cm.
+        # Preserve the starting reference, then smoothly remove that old offset.
+        way = [{m: max(arm.joints[m].range_min, min(arm.joints[m].range_max,
+                    round(p[m] + ff.get(m, 0) * (1 - ease(i / n))))) for m in cmd}
+               for i, p in enumerate(true)]
+        base_angles = self.current_angles()
+
+        def command_height(goals):
+            angles = dict(base_angles)
+            angles.update({MOTOR_JOINTS[m]: self._angle(m, g) for m, g in goals.items()})
+            return t.height(self.tip(angles)[0]) * 100
+
+        command_heights = [command_height(p) for p in way]
+        report.update(start_sag_steps=ff, planned_endpoint_cm=heights[-1],
+                      final_motor_target_cm=command_heights[-1])
+
+        def goals_at(f):
+            i = min(len(true) - 2, int(f))
+            u = f - i
+            out = {}
+            for m in cmd:
+                j = arm.joints[m]
+                v = way[i][m] + (way[i + 1][m] - way[i][m]) * u
+                out[m] = int(max(j.range_min, min(j.range_max, round(v))))
+            return out, heights[i] + (heights[i + 1] - heights[i]) * u
+
+        total = max(0.2, (heights[0] - heights[-1]) / speed)
+        largest = max(abs(b[m] - a[m]) for a, b in zip(way, way[1:]) for m in cmd)
+        total = max(total, n * largest / MAX_JOINT_SPEED)
+        t0, seen_t = time.monotonic(), None
+        hist, over, contact, h_stop = [], 0, False, None
+        while True:
+            el = time.monotonic() - t0
+            s = min(1.0, el / total)
+            goals, h_told = goals_at(s * n)
+            await arm._write([(m, GOAL_POSITION, g.to_bytes(2, "little")) for m, g in goals.items()])
+            await asyncio.sleep(1 / SEND_RATE_HZ)
+            if arm.last_update != seen_t:
+                seen_t = arm.last_update
+                h_is = self.state()[2]
+                report['samples'].append({'elapsed_s': round(el, 4), 'target_cm': h_told,
+                    'motor_target_cm': command_height(goals), 'tip_cm': list(self.state()[:3]),
+                    'joints_raw': {str(m): arm.joints[m].raw for m in MOTOR_JOINTS},
+                    'joints_command': {str(m): g for m, g in goals.items()}})
+                gap = h_is - h_told                      # how far above its told height the arm is
+                hist.append((el, gap))
+                if el > GUARD_BLANK_S:
+                    # its usual lag: the last half second, leaving out the start-up and the newest readings
+                    usual = [g for tt, g in hist if tt >= 0.25 and el - 0.7 <= tt <= el - 0.12]
+                    if usual and gap - min(usual) > GUARD_THRESH_CM:
+                        over += 1
+                    else:
+                        over = 0
+                    if over >= 2:
+                        contact, h_stop = True, h_is
+                        break
+            if s >= 1.0:
+                break
+        if contact:
+            # hold a little above where it met something: the point of the way down with that height
+            want = h_stop + backoff
+            f = float(min(range(n + 1), key=lambda i: abs(command_heights[i] - want)))
+            for i in range(n):
+                if command_heights[i] >= want >= command_heights[i + 1]:
+                    f = i + (command_heights[i] - want) / max(1e-6, command_heights[i] - command_heights[i + 1])
+                    break
+            goals, _ = goals_at(f)
+            await arm._write([(m, GOAL_POSITION, g.to_bytes(2, "little")) for m, g in goals.items()])
+            await arm._settle_and_ease(goals, False, aim=goals)
+        else:
+            end = true[-1]
+            goals, _ = goals_at(float(n))
+            # Do not add a new blind shoulder push just before closing. Retain
+            # the friend's settling/blocked-joint relief, without extra sag pulses.
+            await arm._settle_and_ease(end, False, aim=goals)
+            h_stop = self.state()[2]
+        report.update(contact=contact, final_cm=round(self.state()[2], 2),
+                      commanded_stop_height_cm=command_height(goals),
+                      stop_reason=('contact_inferred' if contact else
+                                   'partial_path_complete' if abs(heights[-1] - floor_cm) > .3 else 'planned_path_complete'),
+                      height_error_cm=round(self.state()[2] - floor_cm, 2))
+        return {"contact": contact, "height_cm": round(h_stop, 2), "final_cm": round(self.state()[2], 2)}
 
     def plan(self, x_cm, y_cm, h_cm, tilt=None, line=False):
         """Returns (path, tilt used or None for a straight line)."""
@@ -345,27 +549,58 @@ class Reacher:
             raise Unreachable(f"The object is {jaws_cm:g} cm wide but the gripper opens only {GRIPPER_OPEN_CM:g} cm "
                               f"(needs {JAW_MARGIN_CM:g} cm to spare). Pick a narrower object or a narrower part of it.")
 
-    async def grab(self, x_cm, y_cm, grab_h=4.0, above_h=12.0, open_pct=100.0, close_pct=0.0, confirm=None):
+    async def grab(self, x_cm, y_cm, grab_h=4.0, above_h=12.0, open_pct=100.0, close_pct=0.0, confirm=None,
+                   object_h=None, guard=False, report=None):
         """Pick up whatever stands at x, y: open, go above, straight down, close, straight up.
 
         grab_h is how high above the table the fingertips are when they close.
         Returns True if the gripper closed on something.
+
+        guard=True: the last part of the way down is done by feel (descend_guarded). With grab_h=None
+        the gripper goes down until it meets something: the table (small objects: the fingertips end
+        right at the table, the lowest and safest grip) or the object's top under the palm (tall
+        objects). So neither the table's exact height nor the object's height has to be known.
+        `report` (a dict) is filled with what happened, for printing.
         """
         arm = self.arm
-        (q_above, _), tilt = self.pose_for(x_cm, y_cm, [above_h, grab_h])
+        report = report if report is not None else {}
+        plan_h = grab_h if grab_h is not None else MIN_TIP_HEIGHT
+        (q_above, _), tilt = self.pose_for(x_cm, y_cm, [above_h, plan_h])
         swing = self.plan_swing(q_above, above_h)
         if confirm:
             await confirm(tilt)
         await arm.move({GRIPPER_ID: open_pct}, 0.8)
         await self.follow(swing, self.duration(swing))
-        down = self.plan_line(x_cm, y_cm, grab_h)
-        await self.follow(down, max(1.5, (above_h - grab_h) / 5))   # about 5 cm/s
-        await arm.move({GRIPPER_ID: close_pct}, 1.0)
-        await asyncio.sleep(0.3)
-        g = arm.joints[GRIPPER_ID]
-        holding = abs(g.raw - g.raw_for(close_pct)) > BLOCKED_STEPS
-        up = self.plan_line(x_cm, y_cm, above_h)
-        await self.follow(up, max(1.5, (above_h - grab_h) / 5))
+        report["tilt_deg"] = tilt
+        if guard:
+            # fast and exact down to a height that clears most things, then slowly by feel
+            mid = min(above_h, max(GUARD_FROM_CM, plan_h + 2.0))
+            if above_h - mid > 0.5:
+                await self.follow(self.plan_line(x_cm, y_cm, mid), max(1.0, (above_h - mid) / 6))
+            report['descent'] = {}
+            felt = await self.descend_guarded(x_cm, y_cm, grab_h if grab_h is not None else GUARD_FLOOR_CM,
+                                               report=report['descent'])
+            report.update(contact=felt["contact"], met_at_cm=felt["height_cm"], closed_at_cm=felt["final_cm"])
+        else:
+            down = self.plan_line(x_cm, y_cm, grab_h)
+            # Going down, depending on the object (object_h, cm; None = unknown, treated as small):
+            #  small: no sag correction. Pushing the arm back up right before closing lifts the jaws off a
+            #         small object; ending a little low is what it needs.
+            #  big:   sag correction on, so the jaws close at the planned height, mid-object.
+            small = object_h is None or object_h < SMALL_OBJECT_CM
+            # small: the push the arm needed hovering above (sag) is added to the way down from the start
+            await self.follow(down, max(1.5, (above_h - grab_h) / 5), correct_sag=not small,
+                              feedforward=small)   # about 5 cm/s
+        mx, my, mh, _ = self.state()                 # where the encoders say the tip ended up
+        report.update(tip_cm=[round(mx, 2), round(my, 2), round(mh, 2)],
+                      tip_off_cm=round(math.hypot(mx - x_cm, my - y_cm), 2))
+        holding, open_now = await arm.close_gripper(close_pct)    # stops when the jaws meet the object
+        report.update(jaws_open_pct=open_now, jaws_gap_cm=round(GRIPPER_OPEN_CM * open_now / 100, 1))
+        lift_from = self.state()[2]
+        await self.lift(x_cm, y_cm, above_h, seconds=max(1.5, (above_h - lift_from) / 5))   # about 5 cm/s
+        if holding and not arm.gripper_still_holding():
+            report["slipped"] = True                 # had it, lost it on the way up
+            holding = False
         return holding
 
 
@@ -405,13 +640,13 @@ class Reacher:
             await confirm(tilt)
         await arm.move({GRIPPER_ID: open_pct}, 0.8)
         await self.follow(swing, self.duration(swing))                       # beside the object, a bit high
-        await self.follow(self.plan_line(sx, sy, grab_h), 1.5)              # down to the closing height
+        await self.follow(self.plan_line(sx, sy, grab_h), 1.5, correct_sag=False)   # down to the closing height
         await self.follow(self.plan_line(x_cm, y_cm, grab_h), max(1.5, back / 4))   # slide in, ~4 cm/s
         await arm.move({GRIPPER_ID: close_pct}, 1.0)
         await asyncio.sleep(0.3)
         g = arm.joints[GRIPPER_ID]
         holding = abs(g.raw - g.raw_for(close_pct)) > BLOCKED_STEPS
-        await self.follow(self.plan_line(x_cm, y_cm, grab_h + lift_cm), 1.5)
+        await self.lift(x_cm, y_cm, grab_h + lift_cm, seconds=1.5)
         return holding
 
 

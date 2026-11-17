@@ -21,11 +21,69 @@ import xml.etree.ElementTree as ET
 
 from pathlib import Path
 
+import json
+
 URDF_RELATIVE = Path("hardware/elrobot/simulation/elrobot_follower.urdf")
 TIP_LINK = "Gripper_Base_v1_1"
 # Point between the closed fingertips, in the Gripper_Base frame (from the jaw meshes).
 TIP_OFFSET = (0.001, 0.100, 0.0)
 MOTOR_JOINTS = {i: f"rev_motor_0{i}" for i in range(1, 8)}  # joint 8 is the gripper itself
+
+# ---------- this arm's own corrections (files in calib/, all optional) ----------
+# trim.json  {"2": 1.5, ..., "roll_raw": 2202}: degrees to add to a joint's angle (its real zero is
+#            not exactly where the calibrated range says), and where joint 7 sits when the gripper is straight.
+# tip.json   {"tip_m": [x, y, z]}: where the point between the fingertips really is, in the gripper's frame.
+# Both are read again whenever the file changes, so no restart is needed.
+_CALIB = Path(__file__).resolve().parent.parent / "calib"
+TRIM_FILE = _CALIB / "trim.json"
+TIP_FILE = _CALIB / "tip.json"
+_trim_cache = {"mtime": None, "deg": {}, "roll_raw": None}
+_tip_cache = {"mtime": None, "tip": TIP_OFFSET}
+
+
+def joint_trim(motor):
+    """Angle fix (rad) for this joint: what its real angle is beyond what the calibration says."""
+    try:
+        mt = TRIM_FILE.stat().st_mtime
+    except OSError:                    # no file (or deleted): no fixes at all
+        _trim_cache.update(mtime=None, deg={}, roll_raw=None)
+        return 0.0
+    if mt != _trim_cache["mtime"]:
+        try:
+            data = json.loads(TRIM_FILE.read_text())
+            _trim_cache["deg"] = {int(k): float(v) for k, v in data.items() if k.isdigit()}
+            _trim_cache["roll_raw"] = data.get("roll_raw")
+        except (ValueError, OSError, AttributeError):
+            _trim_cache["deg"], _trim_cache["roll_raw"] = {}, None
+        _trim_cache["mtime"] = mt
+    return math.radians(_trim_cache["deg"].get(motor, 0.0))
+
+
+def roll_raw():
+    """Where joint 7 (wrist roll) has to be for the gripper to hang straight (set with "trim"),
+    or None: then joint 7 is left wherever it is, as before."""
+    joint_trim(7)                      # (re)loads the file
+    r = _trim_cache.get("roll_raw")
+    return int(r) if r is not None else None
+
+
+def tip_offset():
+    """The point between the fingertips in the gripper's frame (m): tip.json if there is one."""
+    try:
+        mt = TIP_FILE.stat().st_mtime
+    except OSError:
+        _tip_cache.update(mtime=None, tip=TIP_OFFSET)
+        return TIP_OFFSET
+    if mt != _tip_cache["mtime"]:
+        try:
+            t = json.loads(TIP_FILE.read_text())["tip_m"]
+            t = tuple(float(v) for v in t)
+            ok = len(t) == 3 and all(math.isfinite(v) for v in t) and math.dist(t, TIP_OFFSET) < 0.03
+            _tip_cache["tip"] = t if ok else TIP_OFFSET     # more than 3 cm off the drawing: not believable
+        except (ValueError, OSError, KeyError, TypeError):
+            _tip_cache["tip"] = TIP_OFFSET
+        _tip_cache["mtime"] = mt
+    return _tip_cache["tip"]
 
 
 # ---------- small 4x4 matrix helpers (no numpy needed) ----------
@@ -118,9 +176,11 @@ class ArmModel:
         out = {}
         for j in self.chain:
             if j["type"] == "revolute" and j["name"] in self.motor_of:
-                m = joints[self.motor_of[j["name"]]]
+                motor = self.motor_of[j["name"]]
+                m = joints[motor]
                 mid_raw = (m.range_min + m.range_max) / 2
-                out[j["name"]] = (j["lower"] + j["upper"]) / 2 + (m.raw - mid_raw) * 2 * math.pi / 4096
+                out[j["name"]] = ((j["lower"] + j["upper"]) / 2 + joint_trim(motor)
+                                  + (m.raw - mid_raw) * 2 * math.pi / 4096)
         return out
 
     def frames(self, angles: dict[str, float]):
@@ -138,7 +198,7 @@ class ArmModel:
         """Return (tip position, list of every joint position along the arm), in metres."""
         ang = angles if angles is not None else self.angles(percents)
         m, points = self.frames(ang)
-        return _apply(m, TIP_OFFSET), points
+        return _apply(m, tip_offset()), points
 
 
 def _cm(p):

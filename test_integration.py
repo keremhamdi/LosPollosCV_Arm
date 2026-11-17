@@ -243,10 +243,15 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         inference = types.ModuleType("target.gen_python.protobuf.drivers.inferences")
         inference.normvla = Mock()
         with patch.dict(sys.modules, {"arm.station": station, inference.__name__: inference}), patch.object(sys, "path", [str(Path("controller").resolve()), *sys.path]):
-            cls.App = importlib.import_module("arm.click").App
+            cls.click_module = importlib.import_module("arm.click")
+            cls.App = cls.click_module.App
             cls.reach_module = importlib.import_module("arm.reach")
 
     def setUp(self):
+        self._report_writer_original = self.click_module.save_grasp_report
+        writer = patch.object(self.click_module, 'save_grasp_report', return_value='/tmp/test-grasp.json')
+        self.report_writer = writer.start()
+        self.addCleanup(writer.stop)
         self.arm = types.SimpleNamespace(joints={i: joint() for i in range(1, 9)},
                                          joint_updated_at={i: time.monotonic() for i in range(1, 9)})
         self.app = self.App(self.arm)
@@ -264,8 +269,217 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_top_route(self):
         result = await self.app.api("grab", {"x": 1, "y": 2, "z": 4, "above": 12})
-        self.reacher.grab.assert_awaited_once_with(1, 2, 4, 12)
+        self.reacher.grab.assert_awaited_once_with(1, 2, 4, 12, object_h=None, close_pct=0.0)
         self.assertTrue(result["holding"])
+
+    async def test_normal_text_request_reaches_controller_with_numeric_grip_height(self):
+        import grab_text
+        with patch.object(grab_text, 'find_and_grab') as pick, redirect_stdout(io.StringIO()):
+            grab_text.main(['--text','small white cylinder','--no-hand'])
+        args, args_text = pick.call_args.args
+        args.last_text = args_text
+        self.app.camera.locate = Mock(return_value=(3.66,28.84))
+        submitted = []
+        def post(url, json, timeout):
+            import json as wire_json
+            name = url.rsplit('/',1)[1]
+            body = wire_json.loads(wire_json.dumps(json))  # the real HTTP JSON boundary
+            submitted.append((name,body))
+            result = asyncio.run(self.app.api(name,body))
+            return Mock(json=lambda:{'ok':True,**result})
+        with patch.object(grab_text.requests,'post',side_effect=post), \
+                patch.object(grab_text.requests,'get',return_value=Mock(json=lambda:{'log':'test'})), \
+                patch.object(grab_text,'hand_correct',side_effect=AssertionError('Wrist disabled')), \
+                redirect_stdout(io.StringIO()):
+            await asyncio.to_thread(grab_text.go,args,Image.new('RGB',(1280,720)),557,576,
+                                    'small white cylinder',.81,1.5,14.,(2.,1.,None))
+        self.assertEqual(submitted[-1][0],'grab')
+        self.assertNotIn('feel_all_the_way',submitted[-1][1])
+        self.assertTrue(submitted[-1][1]['guard'])
+        self.assertEqual(self.reacher.grab.await_args.args[2],1.5)
+
+    async def test_automatic_objects_route_pose_height_and_explicit_cap_fallback(self):
+        import grab_text
+        import small_object_grasp as small
+        from test_small_object_grasp import cylinder_mask, geometry
+        self.app.camera.locate = Mock(return_value=(3.,25.))
+        def post(url, json, timeout):
+            import json as wire_json
+            name = url.rsplit('/',1)[1]
+            body = wire_json.loads(wire_json.dumps(json))
+            submitted.append((name,body))
+            result = asyncio.run(self.app.api(name,body))
+            return Mock(json=lambda:{'ok':True,**result})
+        for text,mask,expected in [('small white cylinder',cylinder_mask('upright'),1.),
+                                   ('small white cylinder',cylinder_mask('sideways'),.5),
+                                   ('small black cap',cylinder_mask('sideways'),.5)]:
+            with self.subTest(text=text):
+                with patch.object(grab_text,'find_and_grab') as pick, redirect_stdout(io.StringIO()):
+                    grab_text.main(['--text',text])  # no height, posture or camera switches
+                args,_ = pick.call_args.args
+                args.last_text = text
+                self.assertFalse(args.no_hand)
+                submitted=[]
+                with patch.object(grab_text.requests,'post',side_effect=post), \
+                        patch.object(grab_text.requests,'get',return_value=Mock(json=lambda:{'log':'test'})), \
+                        patch.object(grab_text,'hand_correct',return_value=(3.,25.)) as wrist, \
+                        patch.object(grab_text,'estimate_height',side_effect=AssertionError('No generic height guess')), \
+                        redirect_stdout(io.StringIO()):
+                    fit = small.aim_from_mask(small.profile_for(text),mask,geometry())
+                    close,above,est = grab_text.grab_heights(args,mask,(1280,720),aim=fit)
+                    await asyncio.to_thread(grab_text.go,args,Image.new('RGB',(1280,720)),600,600,
+                                            text,.8,close,above,est,aim=fit)
+                body = submitted[-1][1]
+                self.assertEqual(body['height'],expected)
+                self.assertEqual((body['x'],body['y']),(3.,25.))
+                self.assertTrue(body['guard'])
+                self.assertNotIn('feel_all_the_way',body)
+                self.assertEqual(body['pickup_build'],'demo-centering-v3.3')
+                self.assertEqual(self.reacher.grab.await_args.args[2],expected)
+                self.assertEqual(body['height_decision']['closing_height_cm'],expected)
+                if text == 'small black cap':
+                    self.assertNotIn('object_height',body)
+                    self.assertEqual(body['height_source'],'cap_height_range_fallback')
+                else:
+                    self.assertEqual(body['object_height'],2*expected)
+                    self.assertEqual(body['height_source'],'cylinder_pose_and_known_dimensions')
+                wrist.assert_called_once()
+                self.assertEqual(wrist.call_args.args[-1],.75 if text == 'small black cap' else 2*expected)
+
+    async def test_cap_fine_alignment_reaches_controller_and_saves_evidence(self):
+        import grab_text
+        from unittest.mock import mock_open
+        with patch.object(grab_text,'find_and_grab') as pick, redirect_stdout(io.StringIO()):
+            grab_text.main(['--text','small black cap'])
+        args,text = pick.call_args.args
+        args.last_text=text
+        calibration={'target_px':[620.,425.], 'px_per_cm':[[17.25,0.],[0.,17.25]],
+                     'at':[0.,25.], 'look_above':13.}
+        img=Image.new('RGB',(1280,720))
+        self.app.camera.locate=Mock(return_value=(0.,25.))
+        submitted=[]
+        def post(url,json,timeout):
+            import json as wire
+            name=url.rsplit('/',1)[1]
+            body=wire.loads(wire.dumps(json,allow_nan=False))
+            submitted.append((name,body))
+            result={} if name=='release' else asyncio.run(self.app.api(name,body))
+            return Mock(json=lambda:{'ok':True,**result})
+        with patch.object(grab_text.requests,'post',side_effect=post), \
+                patch.object(grab_text.requests,'get',return_value=Mock(json=lambda:{'log':'test'})), \
+                patch('os.path.exists',return_value=True), \
+                patch('builtins.open',mock_open(read_data=json.dumps(calibration))), \
+                patch.object(grab_text,'goto') as move, patch.object(grab_text,'save_hand_view'), \
+                patch.object(grab_text,'save_wrist_report') as saved, \
+                patch.object(grab_text,'find_in_hand',side_effect=[
+                    ((615.6875,425.),img,None), ((620.,425.),img,None), ((620.,425.),img,None)]), \
+                redirect_stdout(io.StringIO()):
+            close,above,est=grab_text.grab_heights(args,None,img.size)
+            await asyncio.to_thread(grab_text.go,args,img,500,500,text,.8,close,above,est)
+        body=submitted[-1][1]
+        self.assertEqual((body['x'],body['y'],body['height']),(.25,25.,.5))
+        self.assertEqual(self.reacher.grab.await_args.args[:3],(.25,25.,.5))
+        self.assertEqual(body['wrist_alignment_report']['status'],'aligned')
+        self.assertEqual(len(body['wrist_alignment_report']['observations']),3)
+        self.assertEqual(move.call_count,2)
+        saved.assert_called_once()
+        self.assertEqual(self.report_writer.call_args.args[0]['request']['wrist_alignment_report'],
+                         body['wrist_alignment_report'])
+
+    async def test_numeric_guarded_grab_closes_and_lifts_without_seeking_table(self):
+        reach = self.reach_module.Reacher.__new__(self.reach_module.Reacher)
+        reach.arm = types.SimpleNamespace(move=AsyncMock(), close_gripper=AsyncMock(return_value=(True,20.)),
+                                         gripper_still_holding=Mock(return_value=True))
+        reach.pose_for = Mock(return_value=(({},{}),0.))
+        reach.plan_swing = Mock(return_value=[{}])
+        reach.plan_line = Mock(return_value=[{}])
+        reach.duration = Mock(return_value=1.)
+        reach.follow = AsyncMock()
+        reach.state = Mock(return_value=(3.66,28.84,1.5,0.))
+        reach.lift = AsyncMock()
+        reach.descend_guarded = AsyncMock(return_value={'contact':False,'height_cm':1.5,'final_cm':1.5})
+        result = await reach.grab(3.66,28.84,1.5,14.,guard=True)
+        reach.descend_guarded.assert_awaited_once_with(3.66,28.84,1.5,report={})
+        reach.arm.close_gripper.assert_awaited_once()
+        reach.lift.assert_awaited_once()
+        self.assertTrue(result)
+
+    async def test_bottle_with_wrist_guidance_keeps_numeric_height_through_controller(self):
+        """Replay the bottle request with a rejected 710px correction and a usable one.
+
+        Vision/calibration/motors are synthetic; client alignment, JSON routing and
+        the controller's close/lift decisions are real code. No robot connection.
+        """
+        import grab_text
+        from unittest.mock import mock_open
+        with patch.object(grab_text, 'find_and_grab') as pick, redirect_stdout(io.StringIO()):
+            grab_text.main(['--text', 'small bottle', '--hand'])
+        args, text = pick.call_args.args
+        args.last_text = text
+        img = Image.new('RGB', (1280, 720))
+        target = (560., 360.)
+        calibration = {'target_px': target, 'px_per_cm': [[17.25, 0.], [0., 17.25]],
+                       'look_above': 13., 'at': [-24.6, 23.2]}
+        self.app.camera.locate = Mock(return_value=(-24.6, 23.2))
+
+        for rejected, points, expected_xy in (
+            (True, [(1270., 360.)], (-25.39, 23.81)),
+            (False, [(577.25, 360.), target], (-25.6, 23.2)),
+        ):
+            with self.subTest(rejected=rejected):
+                reach = self.reach_module.Reacher.__new__(self.reach_module.Reacher)
+                reach.model = FakeModel()
+                reach.arm = types.SimpleNamespace(move=AsyncMock(),
+                    close_gripper=AsyncMock(return_value=(True, 60.)),
+                    gripper_still_holding=Mock(return_value=True))
+                reach.pose_for = Mock(return_value=(({}, {}), 0.))
+                reach.plan_swing = Mock(return_value=[{}])
+                reach.plan_line = Mock(return_value=[{}])
+                reach.duration = Mock(return_value=1.)
+                reach.follow = AsyncMock()
+                reach.state = Mock(return_value=(*expected_xy, 2., 0.))
+                reach.lift = AsyncMock()
+                reach.descend_guarded = AsyncMock(return_value={
+                    'contact': False, 'height_cm': 2., 'final_cm': 2.})
+                self.app.reacher = reach
+                submitted = []
+
+                def post(url, json, timeout):
+                    import json as wire_json
+                    name = url.rsplit('/', 1)[1]
+                    body = wire_json.loads(wire_json.dumps(json))
+                    submitted.append((name, body))
+                    result = {} if name == 'release' else asyncio.run(self.app.api(name, body))
+                    return Mock(json=lambda: {'ok': True, **result})
+
+                output = io.StringIO()
+                with patch.object(grab_text.requests, 'post', side_effect=post), \
+                        patch.object(grab_text.requests, 'get', return_value=Mock(json=lambda: {'log': 'test'})), \
+                        patch.object(grab_text, 'estimate_height', return_value=(4., 4., None)), \
+                        patch('os.path.exists', return_value=True), \
+                        patch('builtins.open', mock_open(read_data=json.dumps(calibration))), \
+                        patch.object(grab_text, 'find_in_hand', side_effect=[(p, img, None) for p in points]) as wrist, \
+                        patch.object(grab_text, 'save_hand_view'), \
+                        patch.object(grab_text, 'save_wrist_report'), \
+                        patch.object(grab_text, 'goto') as move, redirect_stdout(output):
+                    close, above, est = grab_text.grab_heights(args, None, img.size)
+                    await asyncio.to_thread(grab_text.go, args, img, 853, 537, 'small bottle',
+                                            .95, close, above, est)
+
+                body = submitted[-1][1]
+                self.assertEqual(submitted[-1][0], 'grab')
+                self.assertEqual(body['height'], 2.)
+                self.assertEqual(body['object_height'], 4.)
+                self.assertNotIn('feel_all_the_way', body)
+                self.assertEqual((body['x'], body['y']), expected_xy)
+                self.assertEqual(wrist.call_count, len(points))
+                self.assertEqual(move.call_count, len(points))
+                self.assertEqual('not trusting it' in output.getvalue(), rejected)
+                self.assertEqual(body['wrist_alignment_report']['status'],
+                                 'correction_too_large' if rejected else 'aligned')
+                reach.descend_guarded.assert_awaited_once_with(*expected_xy, 2., report={})
+                reach.arm.close_gripper.assert_awaited_once()
+                reach.lift.assert_awaited_once()
 
     async def test_bridge_to_controller_end_to_end_without_sockets(self):
         session = Mock()
@@ -286,6 +500,30 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await self.app.api("grab", {"x": 1, "y": 2, "z": 4, "above": 12})
         self.reacher.grab.assert_not_awaited()
+
+    async def test_motion_error_saves_report_and_releases_busy_flag(self):
+        self.reacher.grab.side_effect = RuntimeError('test motion failure')
+        with self.assertRaisesRegex(RuntimeError, 'test motion failure'):
+            await self.app.api('grab', {'x':1., 'y':25., 'height':2., 'above':14., 'guard':True})
+        report = self.report_writer.call_args.args[0]
+        self.assertEqual(report['error'], 'test motion failure')
+        self.assertEqual(report['controller_build'], 'descent-taper-v1')
+        self.assertEqual(report['target_cm'], [1.,25.,2.])
+        self.assertFalse(self.app.busy)
+
+    async def test_report_writer_persists_json_without_robot_io(self):
+        # The normal fixture patches the writer; use its original implementation.
+        writer = self.report_writer
+        self.assertFalse(writer.called)
+        module = self.click_module
+        with tempfile.TemporaryDirectory() as tmp, patch.object(module, 'REPO_ROOT', Path(tmp)/'controller'):
+            original = self._report_writer_original
+            with redirect_stdout(io.StringIO()):
+                filename = original({'controller_build':'descent-taper-v1', 'error':None,
+                                     'descent':{'samples':[{'target_cm':2.,'motor_target_cm':2.}]}})
+            saved = json.loads(Path(filename).read_text())
+            self.assertEqual(saved['descent']['samples'][0]['target_cm'], 2.)
+            self.assertIn('run_id', saved)
 
     async def test_status_exposes_active_plane_and_original_touches(self):
         self.reacher.table = self.reach_module.Table(.01, -.02, .03, [[.1, .2, .04]])
@@ -337,7 +575,8 @@ class ControllerRoutingTests(unittest.IsolatedAsyncioTestCase):
         globals_ = self.reach_module.Reacher.follow.__globals__
         path = [{name: value for name in self.reach_module.MOTOR_JOINTS.values()} for value in (3001, 3101, 3102)]
         with patch.dict(globals_, {"time": types.SimpleNamespace(monotonic=lambda: next(ticks)),
-                                  "asyncio": types.SimpleNamespace(sleep=AsyncMock())}):
+                                  "asyncio": types.SimpleNamespace(sleep=AsyncMock()),
+                                  "roll_raw": lambda: None}):   # as on an arm without a saved wrist position
             await reach.follow(path, .2)
         for goals in sent:
             self.assertEqual(set(goals), set(range(1, 7)))

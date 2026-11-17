@@ -1,0 +1,320 @@
+LLM HANDOFF — LosPollosCV_Arm — 16 November 2026
+Copy this entire file into the next coding assistant, or ask it to read this file.
+
+You are continuing an existing robotics project. Work from the friend's working
+code on the branch below. Preserve the successful pickups and make targeted,
+tested improvements. Do not rebuild the robot application from an older branch.
+
+1. REPOSITORY AND EXACT CONTINUATION POINT
+
+Repository: https://github.com/keremhamdi/LosPollosCV_Arm
+Branch: feel-grab-reachy
+Motion/result-behaviour checkpoint at the original handoff: cc63f63
+  Full SHA: cc63f63c3e16d0bbb7f983e3bf9e5d9feb5ad341
+  Title: Distinguish pickup holds from completed missed attempts
+Subsequent commits add this handoff, offline comparison and hover-tilt recording.
+Continue from the current branch HEAD; do not check out the checkpoint as a rollback.
+
+Expected pickup build: demo-centering-v3.3
+Expected controller build: descent-taper-v1
+Urgent demo option: add --demo to grab_text.py --hand. This permits a maximum
+4 cm wrist correction in 0.5 cm steps and up to 12 observations; it refuses to
+descend/close if wrist alignment is not accepted. It is opt-in, keeps guarded
+descent, and does not fix an incorrect saved jaw-target calibration. Ordinary
+mode retains the fallback behaviour described below. Latest tests: 179 offline.
+Active entry point: grab_text.py
+Controller entry point: python3 -m arm.click (from controller/)
+
+The Linux robot checkout is:
+  /home/efe/Projects/Robotics Hackathon/LosPollosCV_Arm
+
+Continue and push tested changes to feel-grab-reachy. The user has requested this
+branch explicitly. Inspect local changes before pulling or editing; preserve the
+friend's work. Do not reset or clean the working checkout to force an update.
+The newest build has not been independently confirmed running on the
+Linux arm. Check the printed builds and git revision first.
+
+IMPORTANT: LINUX_HANDOFF.md and the lower README sections describe a separate,
+older text_pick.py integration. The active physical pickup flow is grab_text.py.
+Read docs/GRASP_ACCURACY.md for this branch's current behaviour.
+
+2. OBJECTIVE AND USER PREFERENCES
+
+Type an object name once. The standing camera finds/selects it with SAM 3 and
+estimates its table position. The arm approaches, the wrist camera helps centre
+it between the jaws, then the arm descends, closes and lifts.
+
+Immediate objective: reliably centre and pick the SAME white cylinder when it
+is standing OR lying sideways, and pick a tiny black cap. No per-attempt height
+entry, posture selection or changing CLI flags. Protect the already-working
+upright-cylinder and bottle behaviour.
+
+Later objectives: automatic grasp height/approach for different objects, objects
+on raised surfaces, and placing onto a plate or at a hand. Those require further
+geometry and physical validation; they are not completed features.
+
+Keep both cameras enabled. Do not introduce Ollama: SAM 3 runs in Python through
+PyTorch/Transformers on the friend's CUDA laptop. Optional old model adapters
+elsewhere in the repo are not required for this pickup flow.
+
+The user wants simple copy/paste terminal commands, tests before each push, and
+small changes with a clear reason. Do not solve a miss by blindly lowering the
+arm, adding a global XY offset, disabling checks or replacing the working
+controller. Do not require manual follower positioning for ordinary pickups.
+
+3. HARDWARE, OBJECTS AND CURRENT PHYSICAL RESULTS
+
+Robot: ElRobot arm using the existing NormaCore Station installation.
+Cameras: two ordinary RGB cameras, NOT depth cameras:
+  standing: /dev/video4
+  wrist/gripper: /dev/video6
+Controller page/API: http://127.0.0.1:8890
+Station web: http://127.0.0.1:8889 ; TCP: 127.0.0.1:8888
+Keep mounts, focus/resolution and the robot/table setup consistent with calibration.
+
+Measured white cylinder: 2 cm long, 1 cm diameter.
+  Upright height: 2 cm. Sideways height: approximately 1 cm.
+Black cap: operator supplied a HEIGHT RANGE of 5–10 mm, not an exact measurement.
+  Do not invent its diameter or treat the range midpoint as measured depth.
+Checkerboard square size: measured 2.15 cm.
+
+Latest USER-REPORTED observations:
+  - Upright white cylinder and small bottle are picked quite well.
+  - Sideways cylinder is picked sometimes, but centring/misses remain intermittent.
+  - Black cap has been picked successfully, but also has centring problems.
+  - It is not known whether the remaining offset exists while hovering or appears
+    during descent. The user was asked and had not noticed which.
+  - No fresh successful-versus-failed run pair from the latest builds has yet
+    established the root cause. Do not claim the centring issue is solved.
+
+4. CURRENT PICKUP BEHAVIOUR
+
+Detection and height:
+  - SAM 3 provides matching regions/masks. It does not return metric object depth.
+  - Named-object prompt retries and closer table crops help recover small or
+    sideways objects. No generic "any small object" wrist fallback is used.
+  - small_object_grasp.py contains profiles for "small white cylinder" and
+    "small black cap". Cylinder silhouette fitting compares upright and sideways
+    hypotheses using the known 2 x 1 cm dimensions and approximate camera geometry.
+  - An accepted upright cylinder fit selects a closing height of 1 cm above table.
+  - An accepted sideways cylinder fit selects 0.5 cm.
+  - Ambiguous/rejected cylinder geometry uses a LABELLED 0.5 cm fallback.
+  - Cap remains at a LABELLED 0.5 cm range-based fallback. Its height is NOT
+    automatically measured. At exactly 5 mm tall it is at this clearance boundary.
+  - The fit must agree with the standing aim within 2 cm and be reachable. Height
+    selection has additional overlap, hypothesis-separation, mask-size and
+    frame-clipping checks. These are heuristics, not measured confidence guarantees.
+  - Other objects retain the older upright-height estimate: half estimated height,
+    clamped to 1.5–6 cm; unknown height falls back to 1.5 cm. Arbitrary thin,
+    sideways, irregular or elevated objects are NOT reliably supported by this.
+
+Wrist centring:
+  - Both cameras are enabled by default; --hand makes that explicit.
+  - The current wrist target point is the mask's pixel centroid compared with a
+    SAVED target pixel in controller/calib/hand.json. It does not detect the actual
+    physical midpoint of the claws anew in each image.
+  - hand.json supplies a 2D pixels-per-cm matrix and a target pixel, not full 3D
+    camera-to-gripper calibration. A wrong saved target can remain wrong even when
+    the terminal says alignment is confirmed.
+  - Distant detections are filtered before selection. Local cropped retries keep
+    the requested identity; old arbitrary "small white object" substitution was
+    removed from the active search path.
+  - The two small-object profiles allow corrections up to 0.5 cm per step, with
+    total suggested displacement limited to 2 cm from the standing aim.
+  - Cap and sideways/uncertain cylinder use fine centring: estimated offset under
+    0.15 cm in two fresh images, agreeing within 0.1 cm, with at most eight looks.
+    No extra arm move is made between the two confirmation observations. Repeated
+    host frame IDs do not count twice. This is NOT proven 1.5 mm physical accuracy.
+  - Bottle and confidently upright cylinder retain their earlier 0.3 cm / one-look
+    acceptance, with at most five alignment looks.
+  - If wrist alignment is missing, lost or unconfirmed, the code still proceeds
+    using the standing aim. This is a fallback, NOT wrist-confirmed centring.
+  - The small-object profiles have no inherited 1 cm outward offset. Other objects
+    retain that fallback offset unless wrist alignment is confirmed.
+
+Descent and outcome:
+  - Normal pickup honours its planned numeric closing height. It does NOT descend
+    until table contact is mandatory. Do not restore automatic feel_all_the_way.
+  - Controller descent tapers carried-over shoulder/sag compensation to zero
+    toward the closing endpoint and avoids a fresh sag push immediately before
+    closing. It retains guarded contact handling and complete-path requirements.
+  - Wrist alignment happens at a hover pose. There is NO continuous camera
+    correction during the final descent and NO general 3D grasp planner here.
+  - Holding is inferred from gripper encoder behaviour, with a slip check after
+    the normal top-pick lift. It is not visual proof of the correct object's pickup.
+  - Latest terminal labels: HOLD DETECTED, MISSED, SLIPPED, FAILED, UNCONFIRMED.
+    Previously OK could be printed with holding:false because only request
+    completion was checked. cc63f63 fixes reporting, not physical accuracy.
+
+5. CHANGES ALREADY MADE
+
+  656b51f — Tapered descent compensation; bounded, checked wrist corrections;
+            both-camera guidance default; controller reports and debug collector.
+  8f65128 — Automatic named profiles, prompt/crop retries, cylinder centre fitting,
+            low grips and smaller small-object corrections. Initially both named
+            profiles always closed at 0.5 cm; this is NOT the final cylinder policy.
+  37d9770 — Connected qualified cylinder pose estimates to 1 cm upright / 0.5 cm
+            sideways height selection; explicit ambiguous/cap fallback reporting.
+  743e613 — Tighter cap/sideways centring with two-image confirmation and detailed
+            wrist evidence. Upright/bottle acceptance preserved.
+  cc63f63 — Distinguish holding from a completed but missed attempt in the terminal.
+  Later diagnostics — compare_grabs.py compares recorded attempts; debug ZIPs
+            include the comparison. Wrist traces now retain the hover tilt already
+            returned by the controller. This does not change move commands.
+
+Older failed experimental feel-stop-v2 behaviour required contact and could press
+the table or refuse closure. Do not bring it back as the default. This branch is
+based on the friend's working motion flow, not the earlier generic integration.
+
+6. WHAT TO INVESTIGATE NEXT — PRIORITY ORDER
+
+A. Confirm the exact running revision/build. Pulling does not reload Python.
+B. Preserve a baseline upright-cylinder/bottle success. Reproduce one sideways
+   success and one sideways miss at a similar table location; then test the cap.
+   Collect each attempt before another overwrites the latest images.
+C. Compare standing mask/centre fit, wrist images, wrist_alignment.json and the
+   matching controller report. Determine whether fine alignment was actually
+   active and accepted, or whether the run fell back to standing-camera aim.
+D. Use a short video of the final approach/descent to establish when the physical
+   offset appears. Encoder/FK reports alone do not measure the true tabletop or
+   prove physical fingertip accuracy.
+E. Investigate ONE supported cause at a time. Candidates, not established causes:
+   - Wrong/partial SAM region or mask centroid displaced from useful grasp centre.
+   - Saved wrist target calibrated for a different apparent object surface/pose.
+   - Approximate standing projection or rejected centre fit using an edge aim.
+   - Wrist tilt/pose changes between hover alignment and final descent.
+   - Remaining calibration, fingertip/TCP, compliance or descent tracking error.
+   - Cylinder rolling or being pushed during closure.
+F. Apply a narrow fix, run relevant offline tests, push to feel-grab-reachy, give
+   exact restart/test commands, and compare physical results. Do not keep tightening
+   tolerances as a substitute for diagnosing a systematic offset.
+
+For demonstration reliability, count actual lifts retained in the claws across
+repeated attempts and several nearby positions/sideways angles. Do not count a
+green mask, "alignment confirmed", HTTP ok, or simulated test as a physical success.
+
+7. CALIBRATION FACTS AND LIMITS
+
+Local calibration files are ignored by Git. Preserve this robot's originals:
+  controller/calib/table.json, camera.json, hand.json, plus local poses/trim files.
+Use the existing working checkout. Do not replace these with another robot's
+calibration, delete them, or press camera-calibration Reset as a routine update.
+
+Historical supplied debug data showed table-fit RMS about 0.94 cm and a maximum
+touch discrepancy about 1.60 cm. These are OLD recorded measurements, not a fresh
+measurement of today's setup. They are much larger than the tiny cap's clearance.
+The previously discussed "under 1 cm" calibration target alone is insufficient
+evidence for reliable grasping of a 5 mm object. Diagnose and validate local errors
+if the new evidence points to calibration; do not assume recalibration is the
+first fix for a working upright pickup.
+
+Full two-camera depth is unfinished. calibrated_pair.py / multiview_geometry.py
+are offline utilities, not the active grab_text.py depth pipeline. General 3D
+requires camera intrinsics/distortion, fixed-camera-to-base and wrist-camera-to-
+gripper transforms, appropriate frames/poses and valid physical correspondences.
+Two mask centres are not automatically matching 3D points. A table homography
+alone does not establish these calibrations. See docs/DEVELOPMENT_NOTES.md.
+
+8. LINUX COMMANDS
+
+Update from the EXISTING checkout while the arm is stationary. Stop the idle
+pickup process with Ctrl+C first. Preserve local changes if Git reports a problem.
+
+  cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
+  git status --short
+  git switch feel-grab-reachy && git pull --ff-only
+  git log -1 --oneline
+
+If Station is already running, leave it running. Only if stopped, use its existing
+working installation in its own terminal (the previously used path/command was):
+
+  cd "$HOME/Projects/Robotics Hackathon/Robotic Arm"
+  ./station --web 127.0.0.1:8889 --tcp 127.0.0.1:8888
+
+Controller, in its own terminal if it needs starting/restarting:
+
+  cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm/controller"
+  python3 -m arm.click --camera /dev/video4 --hand-camera /dev/video6
+
+Follower should be Self-controlled in Station; use Hold arm on the controller
+page. This enables autonomous control, not manual follower positioning. Do not
+start with --read-only for a physical pickup. Verify camera devices if Linux
+renumbered them. Keep both cameras enabled.
+
+Pickup, in another terminal:
+
+  cd "$HOME/Projects/Robotics Hackathon/LosPollosCV_Arm"
+  .venv/bin/python -u -B grab_text.py --hand
+
+At "What now?" type:
+  small white cylinder
+or:
+  small black cap
+or the existing bottle description.
+
+No --close or --object-height is needed for these two profiles. --close means
+fingertip height above the table in cm, NOT jaw width. q exits the idle program.
+If controller is already descent-taper-v1, the latest client/reporting changes
+only need the pickup process restarted. Controller changes require its restart.
+
+9. DIAGNOSTICS AND TESTING
+
+After an attempt finishes, before another attempt or parking, collect from
+another terminal at the repo root:
+
+  .venv/bin/python -B collect_arm_debug.py
+
+This only reads state and writes ~/Downloads/arm_debug_TIMESTAMP.zip. It does
+not upload to chat or send it to anyone. Attach/transfer the ZIP explicitly.
+It includes versions, running process folders, local calibration, original
+standing image, selected mask, wrist images/decisions and the last three reports.
+
+Useful files:
+  pick_views/standing_input.jpg          original standing frame
+  pick_views/selected_mask.png           selected standing mask
+  pick_views/latest.jpg                 annotated standing detection
+  pick_views/hand_latest_*.jpg           wrist overlays (check run/step relevance)
+  pick_views/wrist_alignment.json        current alignment decisions and frame IDs
+  config/local/grasp_runs/*.json         timestamped controller requests/results
+
+The ZIP also includes grasp_comparison.txt when two local reports are available.
+To print the comparison locally without SAM, cameras or a robot connection:
+  python3 -B compare_grabs.py
+To compare two collected ZIPs, pass their paths as the two positional arguments.
+With two ZIPs it uses the newest report from each; with one ZIP, its newest two.
+These are not automatically a labelled success/failure pair. Compare the source
+filenames with the observed attempts. Missing values remain unknown, and all
+position errors are model/encoder estimates, not physical measurements.
+
+Key source files:
+  grab_text.py                          detection routing, height, wrist loop, output
+  small_object_grasp.py                 profiles, pose/centre fitting, height decision
+  controller/arm/reach.py               IK paths, compensation, descent and lift
+  controller/arm/arm.py                 motor control and holding heuristics
+  controller/arm/click.py               API routing and report persistence
+  compare_grabs.py                      offline run comparison; no robot I/O
+
+Offline test command from Linux repo root:
+  .venv/bin/python -B -m unittest discover -q
+
+The latest suite passes 179 tests on the development Mac using its existing sibling
+venv (the earlier cc63f63 checkpoint passed 165). SAM outputs and hardware feedback are mocked; geometry simulations are
+synthetic. No robot or live GPU inference was run by Codex there. Test results
+must not be described as physical grasp success or millimetre accuracy.
+Focused suites include test_wrist_selection.py, test_small_object_grasp.py,
+test_descent_taper.py, test_grab_camera_mode.py, test_grab_outcome.py and
+test_integration.py and test_compare_grabs.py. Update tests to cover the observed failure, not just the
+chosen implementation. Check git diff --check before committing.
+
+10. SECONDARY INTEGRATION — NOT THE CURRENT BLOCKER
+
+The project also has dispense_server.py for Reachy Mini / Medicine Buddy, with
+POST /v1/dispense and schema medicine_buddy.arm.v1. The intended flow is verbal
+consent, structured object request, one-shot locate/pick/place, result reporting,
+then Buddy tracks whether it was taken. The user explicitly prioritised arm
+accuracy over this connection. Do not divert this session into Reachy networking
+or claim that the latest grab_text.py changes validate that separate server.
+
+START HERE: inspect this checkout and current builds, read the latest physical
+run evidence, explain what is known versus still hypothetical, then fix the
+sideways-cylinder/cap centring issue while preserving the working pickups.

@@ -1,5 +1,47 @@
 # LosPollosCV_Arm
 
+Continuing this project with another LLM? Read or paste
+[CONTINUE_HERE.txt](CONTINUE_HERE.txt): branch, working behaviour, unresolved
+sideways-cylinder/cap centring, evidence, and Linux commands.
+
+**Active branch: `feel-grab-reachy`. Pickup build: `demo-centering-v3.3`.
+Controller build: `descent-taper-v1`.**
+For the time-limited demo, run `grab_text.py --hand --demo`. This opt-in mode
+allows up to 4 cm wrist correction in 0.5 cm steps and at most 12 observations.
+It requires confirmed wrist alignment before descending, instead of picking
+from an unconfirmed standing-camera fallback. Normal mode remains available.
+It cannot correct a systematically wrong jaw-target calibration and has only
+been tested offline. Put one object in the central calibrated area for the demo.
+The friend's pickup flow now tapers hover compensation to zero during descent,
+keeps the planned closing height, and uses standing + wrist guidance by default.
+Wrist matching excludes distant detections and verifies each small correction.
+The cap and sideways/uncertain cylinder require an estimated XY offset below
+1.5 mm in two consistent, fresh wrist images. Bottle and accepted-upright
+cylinder alignment retain the previous check. These are image-based thresholds,
+not measured physical accuracy; the wrist calibration still needs to be correct.
+Pickup results distinguish `HOLD DETECTED`, `MISSED`, `SLIPPED`, `FAILED` and
+`UNCONFIRMED`. Holding is inferred from gripper feedback, not a camera-verified
+lift of the requested object. Visually confirm it leaves the table with the claws.
+`python3 -B compare_grabs.py` compares the last two recorded attempts without
+loading SAM or contacting the robot. Debug ZIPs include that comparison when two
+reports exist. New wrist traces also record the controller-reported hover tilt
+for comparison with pickup tilt; recording it does not change motion.
+Type `small white cylinder` for the measured 2 × 1 cm cylinder, standing or lying
+sideways, or `small black cap` for the reported 5–10 mm cap. These names select
+profiles; no per-run height or orientation flag is needed. An accepted upright
+cylinder fit selects a 1 cm grip; sideways selects 0.5 cm. An uncertain pose
+uses a labelled 0.5 cm fallback. The cap still uses its range-based 0.5 cm
+fallback; its height is not measured automatically.
+These profiles use known dimensions/ranges, not measured RGB depth. The 5 mm cap remains
+at the minimum fingertip-clearance boundary and needs physical validation.
+To use **both cameras**,
+start the controller with `--camera /dev/video4 --hand-camera /dev/video6`
+and run `.venv/bin/python -B grab_text.py --hand` from the repository root. See
+[current status and test commands](docs/GRASP_ACCURACY.md).
+
+The sections below describe the separate `text_pick.py` integration. For the
+friend's working `grab_text.py` pickup flow, use the branch guide linked above.
+
 Text-prompted object detection, segmentation and grasp proposals for an ElRobot
 with **two continuously connected cameras: one fixed standing camera and one
 mounted on the gripper**. Combines [Robot_Vision](https://github.com/keremhamdi/Robot_Vision)
